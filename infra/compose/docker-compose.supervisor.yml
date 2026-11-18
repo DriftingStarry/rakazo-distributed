@@ -1,0 +1,107 @@
+# Standalone supervisor for SANDBOX_PROVIDER=remote-docker: bot computers run on this Docker host
+# while the API, worker and web run on another one. It is the same supervisor the app image runs
+# in-stack (docker-compose.images.yml), started in the mode that serves another deployment.
+#
+# This host holds the Docker socket, which is root-equivalent here, and every bot computer. Put it
+# on a dedicated host, publish its one port on a private address, and reach that address over an
+# encrypted link (TLS, WireGuard, a tailnet): a private network alone is not encrypted. See
+# docs/self-host-docker-computers.md#supervisor-on-another-host.
+#
+#   cp .env.supervisor.example .env   # fill in the token and the bind address
+#   docker compose --env-file .env -f docker-compose.supervisor.yml up -d
+#
+# Install the restricted-egress rules before the first computer starts:
+#   sudo bash restrict-computer-egress.sh
+name: rakazo-supervisor
+
+# Bounded container logs even on hosts without infra/compose/docker-daemon.json; same driver and
+# limits the production stack uses.
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # One-shot stub whose image the supervisor launches bot computers from. It pulls the image
+  # before the supervisor starts, then exits; it never runs a computer itself.
+  computer:
+    image: ${RAKAZO_COMPUTER_IMAGE:-ghcr.io/elie222/rakazo/computer}:${RAKAZO_COMPUTER_IMAGE_TAG:-latest}
+    pull_policy: missing
+    command: ["true"]
+    network_mode: none
+    restart: "no"
+
+  supervisor:
+    image: ${RAKAZO_IMAGE:-ghcr.io/elie222/rakazo/app}:${RAKAZO_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: ["pnpm", "--filter", "@rakazo/sandbox-supervisor", "start"]
+    init: true
+    # The socket is root-equivalent, so the process holding it is root. Run this container on a
+    # host that runs nothing else you care about.
+    user: root
+    logging: *logging
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 512m
+    environment:
+      MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-10}
+      NODE_ENV: production
+      # Kept for the network owner hash, as in the in-stack supervisor. No data volume is mounted:
+      # a remote computer keeps its home in its own container.
+      DATA_DIR: /data
+      # Inside this container the listener takes every interface; the published port below is
+      # what decides where the host exposes it, and that must be an explicit private address.
+      SUPERVISOR_HOST: "0.0.0.0"
+      SUPERVISOR_PORT: "7091"
+      # Serve an API, worker and web that run elsewhere: computers keep their home in their own
+      # container, and their screens come back through this port.
+      SANDBOX_SUPERVISOR_REMOTE: "true"
+      DOCKER_SOCKET: /var/run/docker.sock
+      RAKAZO_COMPUTER_IMAGE: ${RAKAZO_COMPUTER_IMAGE:-ghcr.io/elie222/rakazo/computer}:${RAKAZO_COMPUTER_IMAGE_TAG:-latest}
+      RAKAZO_COMPUTER_MEMORY: ${RAKAZO_COMPUTER_MEMORY:-2g}
+      RAKAZO_COMPUTER_CPUS: ${RAKAZO_COMPUTER_CPUS:-2}
+      RAKAZO_COMPUTER_PIDS_LIMIT: ${RAKAZO_COMPUTER_PIDS_LIMIT:-2048}
+      SANDBOX_COMMAND_TIMEOUT_MS: ${SANDBOX_COMMAND_TIMEOUT_MS:-300000}
+      SANDBOX_TEAM_SCREEN_LIMIT: ${SANDBOX_TEAM_SCREEN_LIMIT:-0}
+      SANDBOX_MAX_COMPUTERS_PER_SPACE: ${SANDBOX_MAX_COMPUTERS_PER_SPACE:-0}
+      SANDBOX_SUPERVISOR_TOKEN: ${SANDBOX_SUPERVISOR_TOKEN:?Set SANDBOX_SUPERVISOR_TOKEN to the token the API and worker use}
+      # Each computer gets its own bridge, which the supervisor joins to reach its screen and
+      # control port.
+      SANDBOX_SCREEN_NETWORK: isolated
+      # Refuse to start computers until restrict-computer-egress.sh is installed on this host.
+      # Set open only when this host's network access is intended, as on Docker Desktop.
+      SANDBOX_COMPUTER_EGRESS: ${SANDBOX_COMPUTER_EGRESS:-restricted}
+      SANDBOX_COMPUTER_DNS: ${SANDBOX_COMPUTER_DNS:-}
+      SANDBOX_COMPUTER_MOUNTS: ${SANDBOX_COMPUTER_MOUNTS:-}
+      SANDBOX_COMPUTER_COMPUTE_GPUS: ${SANDBOX_COMPUTER_COMPUTE_GPUS:-}
+      SANDBOX_COMPUTER_BROWSER_PROXY_PAC_URL: ${SANDBOX_COMPUTER_BROWSER_PROXY_PAC_URL:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-}
+      AXIOM_TOKEN: ${AXIOM_TOKEN:-}
+      AXIOM_DATASET: ${AXIOM_DATASET:-}
+      AXIOM_EDGE: ${AXIOM_EDGE:-}
+      AXIOM_EDGE_URL: ${AXIOM_EDGE_URL:-}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+    # The one published port: the origin the deployment sets as SANDBOX_SUPERVISOR_URL. Always
+    # name the private address the app host reaches, never 0.0.0.0 (loopback is fine for a smoke
+    # test behind a local TLS proxy or tunnel).
+    ports:
+      - "${SANDBOX_SUPERVISOR_BIND:?Set SANDBOX_SUPERVISOR_BIND to the private address the API host reaches (not 0.0.0.0)}:7091:7091"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      computer:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:7091/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 20
