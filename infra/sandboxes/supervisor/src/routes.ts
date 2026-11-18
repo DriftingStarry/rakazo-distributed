@@ -84,6 +84,7 @@ import {
 } from "./networks.js";
 import { publishedScreenUrl } from "./readiness.js";
 import { limitSupervisorRequestBody, supervisorFileWriteSchema } from "./request-limits.js";
+import { screenAnswer } from "./screen-relay.js";
 import {
   computerScreenBoots,
   computerScreens,
@@ -902,6 +903,10 @@ app.post("/computers/:id/files", async (c) => {
 });
 
 app.get("/computers/:id/screen", async (c) => {
+  // A local supervisor answers with the address it publishes the screen on. A remote one relays its
+  // screens instead (see screenAnswer): this redirect would name the computer's private address and
+  // the screen's view token, neither of which the caller can reach or should be handed.
+  if (computerHomeMode !== "local") return c.json({ error: "screen is not served here" }, 404);
   const headers = identityHeaders(c);
   const id = c.req.param("id");
   try {
@@ -937,8 +942,8 @@ app.post("/computers/:id/screen-mode", async (c) => {
   try {
     const id = c.req.param("id");
     const { botId, spaceId, screenId, screenLeaseId } = identityHeaders(c);
-    const { container, info } = await managedContainer(id, botId, spaceId);
-    const { layout, viewToken } = await withComputerScreenLock(id, async () => {
+    const { container } = await managedContainer(id, botId, spaceId);
+    const screen = await withComputerScreenLock(id, async () => {
       const screen = await ensureManagedScreen(
         id,
         container,
@@ -967,14 +972,17 @@ app.post("/computers/:id/screen-mode", async (c) => {
       }
       return screen;
     });
-    const screenUrl = await publishedScreenUrl(
-      container,
-      info,
-      body.interactive ? layout.controlPort : layout.viewPort,
-    );
-    return c.json({
-      screenUrl: screenUrlWithToken(screenUrl, body.interactive ? body.controlToken! : viewToken),
+    const port = body.interactive ? screen.layout.controlPort : screen.layout.viewPort;
+    const screenUrl = await publishedScreenUrl(container, screen.info, port);
+    const answer = screenAnswer({
+      mode: computerHomeMode,
+      publishedUrl: screenUrl,
+      token: body.interactive ? body.controlToken! : screen.viewToken,
+      secret: supervisorToken,
+      info: screen.info,
+      port,
     });
+    return c.json({ screenUrl: answer.url, relayCredential: answer.relayCredential });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return c.json({ error: message }, 400);
@@ -991,10 +999,10 @@ app.post("/computers/:id/terminal", async (c) => {
   try {
     const id = c.req.param("id");
     const { botId, spaceId, screenId, screenLeaseId } = identityHeaders(c);
-    const { container, info } = await managedContainer(id, botId, spaceId);
+    const { container } = await managedContainer(id, botId, spaceId);
     const cwd = workspaceTarget(normalizeWorkspaceRelative(body.cwd));
     const terminalToken = randomUUID();
-    const layout = await withComputerScreenLock(id, async () => {
+    const screen = await withComputerScreenLock(id, async () => {
       const screen = await ensureManagedScreen(
         id,
         container,
@@ -1014,10 +1022,19 @@ app.post("/computers/:id/terminal", async (c) => {
       );
       if (result.code === 75) throw new TerminalControlReleasedError();
       if (result.code !== 0) throw new Error(result.stderr || "terminal failed to start");
-      return screen.layout;
+      return screen;
     });
-    const screenUrl = await publishedScreenUrl(container, info, layout.controlPort);
-    return c.json({ terminalUrl: screenUrlWithToken(screenUrl, terminalToken) });
+    const port = screen.layout.controlPort;
+    const screenUrl = await publishedScreenUrl(container, screen.info, port);
+    const answer = screenAnswer({
+      mode: computerHomeMode,
+      publishedUrl: screenUrl,
+      token: terminalToken,
+      secret: supervisorToken,
+      info: screen.info,
+      port,
+    });
+    return c.json({ terminalUrl: answer.url, relayCredential: answer.relayCredential });
   } catch (error) {
     if (error instanceof TerminalControlReleasedError) {
       return c.json({ error: "screen control is not active" }, 409);

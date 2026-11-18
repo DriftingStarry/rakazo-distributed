@@ -2869,3 +2869,44 @@ describe("computer network reclaim", () => {
     });
   });
 });
+
+describe("own screen route by home mode", () => {
+  const headers = {
+    authorization: `Bearer ${resolveSupervisorToken(process.env)}`,
+    "x-rakazo-bot-id": "bot",
+    "x-rakazo-space-id": "space",
+  };
+
+  it("refuses the redirect on a remote supervisor instead of naming the computer's address", async () => {
+    // A remote supervisor hands out screens as relay paths with a credential of their own
+    // (screenAnswer). The redirect is the local deployment's answer: it names the computer's
+    // private address and its view token, and reaching it is not this caller's to do.
+    vi.stubEnv("SANDBOX_SUPERVISOR_REMOTE", "true");
+    const { supervisorApp } = await import("./index.js");
+    const container = {
+      inspect: vi.fn(async () => ({
+        Config: {
+          Labels: {
+            "rakazo.managed": "true",
+            "rakazo.botId": "bot",
+            "rakazo.spaceId": "space",
+            "rakazo.homeMode": "remote",
+          },
+        },
+        HostConfig: { NetworkMode: computerNetworkNameFor("bot") },
+        State: { Running: true },
+        NetworkSettings: {
+          Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] },
+        },
+      })),
+      exec: vi.fn(),
+    };
+    mocks.docker.getContainer.mockReturnValue(container);
+    const response = await supervisorApp.request("/computers/remote-screen/screen", { headers });
+    expect(response.status).toBe(404);
+    expect(response.headers.get("location")).toBeNull();
+    await expect(response.json()).resolves.toEqual({ error: "screen is not served here" });
+    // Nothing was looked up or set up for a screen this supervisor does not serve this way.
+    expect(mocks.docker.getContainer).not.toHaveBeenCalled();
+  });
+});

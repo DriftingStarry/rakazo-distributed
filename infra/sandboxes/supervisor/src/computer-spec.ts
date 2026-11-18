@@ -741,10 +741,23 @@ export function screenUrlFor(hostPort: string, host = SCREEN_HOST) {
   return `http://${host}:${hostPort}/embed.html`;
 }
 
+/** The socket a screen page opens, named the way noVNC's `path` parameter names it. */
+export function screenSocketPath(token: string) {
+  return `websockify?token=${encodeURIComponent(token)}`;
+}
+
 export function screenUrlWithToken(screenUrl: string, token: string) {
   const url = new URL(screenUrl);
-  url.searchParams.set("path", `websockify?token=${encodeURIComponent(token)}`);
+  url.searchParams.set("path", screenSocketPath(token));
   return url.toString();
+}
+
+/**
+ * The same screen relative to a supervisor that relays it. The adapter that asked for it adds the
+ * origin it already calls, so a remote supervisor never has to guess the address it is reached at.
+ */
+export function screenRelayPath(token: string) {
+  return `/embed.html?${new URLSearchParams({ path: screenSocketPath(token) })}`;
 }
 
 /**

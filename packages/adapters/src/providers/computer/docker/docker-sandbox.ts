@@ -26,6 +26,7 @@ import {
 import { COMPUTER_UNRESPONSIVE_ERROR } from "@rakazo/contracts";
 import { cancelResponseBody, ResponseTooLargeError, requestDeadline } from "@rakazo/core";
 import { boundedSandboxCommandTimeoutMs } from "@rakazo/core/node/sandbox-command";
+import { SCREEN_RELAY_HEADER } from "@rakazo/core/node/screen-capability";
 import { resolveSupervisorToken } from "@rakazo/core/node/secrets-guard";
 import { outgoingCorrelationHeaders } from "@rakazo/logging";
 import { sandboxCommandArgv } from "../../../computers/sandbox/sandbox-command-environment.js";
@@ -109,6 +110,11 @@ function encodedFileResponseLimit(maxBytes: number | undefined): number {
   // Account for base64 expansion plus the small JSON envelope without applying
   // the generic response cap, which would reject valid files above ~12 MiB.
   return Math.ceil(maxBytes / 3) * 4 + 1024;
+}
+
+/** The credential for one relayed screen; the server proxy sends it and no client sees it. */
+function relayHeaders(credential: string) {
+  return { [SCREEN_RELAY_HEADER]: credential };
 }
 
 /** Named so the API's isSandboxGoneError recognizes it and clears the dead computer row. */
@@ -405,13 +411,19 @@ export class DockerSandboxProvider implements SandboxProvider {
       }
       return { url: null, mimeType: "text/html", close: async () => undefined };
     }
-    const body = await readSandboxJson<{ screenUrl?: string }>(res, context.signal);
+    const body = await readSandboxJson<{ relayCredential?: string; screenUrl?: string }>(
+      res,
+      context.signal,
+    );
     if (request.interactive && !body.screenUrl) {
       throw new Error("control screen failed to start");
     }
     return {
-      url: body.screenUrl ?? this.url(`/computers/${computer.id}/screen`),
+      url: body.screenUrl
+        ? this.screenAddress(body.screenUrl)
+        : this.url(`/computers/${computer.id}/screen`),
       mimeType: "text/html",
+      ...(body.relayCredential ? { headers: relayHeaders(body.relayCredential) } : {}),
       close: async () => undefined,
     };
   }
@@ -427,8 +439,25 @@ export class DockerSandboxProvider implements SandboxProvider {
       const detail = await safeBody(res, context.signal);
       throw new Error(`sandbox terminal failed: ${res.status} ${detail}`.trim());
     }
-    const body = await readSandboxJson<{ terminalUrl: string }>(res, context.signal);
-    return { url: body.terminalUrl };
+    const body = await readSandboxJson<{ relayCredential?: string; terminalUrl: string }>(
+      res,
+      context.signal,
+    );
+    return {
+      url: this.screenAddress(body.terminalUrl),
+      ...(body.relayCredential ? { headers: relayHeaders(body.relayCredential) } : {}),
+    };
+  }
+
+  /**
+   * Where the screen the supervisor answered with is served. A supervisor that relays its screens
+   * answers with a path on itself, because it does not know the address the deployment reaches it
+   * at; a local one answers with the address it publishes.
+   */
+  private screenAddress(screenUrl: string) {
+    return this.kind === "remote-docker"
+      ? new URL(screenUrl, `${this.supervisorUrl.replace(/\/$/, "")}/`).toString()
+      : screenUrl;
   }
 
   async setScreenControl(

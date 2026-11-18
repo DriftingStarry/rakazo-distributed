@@ -9,6 +9,12 @@ export const SCREEN_PROXY_TTL_MS = 60 * 60_000;
 export const SCREEN_TARGET_ENDPOINT = "/api/internal/screen-target";
 export const SCREEN_RECHECK_MS = 1_000;
 /**
+ * Where a supervisor that relays its screens (one another deployment reaches) takes its short-lived
+ * credential for one screen. Sealed with the rest of a screen capability, it reaches the supervisor
+ * only through the server proxy: never the service bearer, and never the browser.
+ */
+export const SCREEN_RELAY_HEADER = "x-rakazo-screen-relay";
+/**
  * An open screen rides out an authority it can't reach (a timeout, a dropped connection, a
  * server error) for at most this long after the last check that said yes was sent. A refusal
  * still ends it at once.

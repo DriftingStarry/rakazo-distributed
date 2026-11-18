@@ -1,15 +1,33 @@
+import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { serve } from "@hono/node-server";
+import { getRequestListener } from "@hono/node-server";
 import { SERVICE_NAMES } from "@rakazo/logging";
 import { createRootLogger } from "@rakazo/logging/axiom";
 import { computerResourceLimits } from "./computer-spec.js";
-import { computerEgressSetting, ensureComputerImage, screenNetworkMode } from "./context.js";
+import {
+  computerEgressSetting,
+  computerHomeMode,
+  docker,
+  ensureComputerImage,
+  screenNetworkMode,
+  supervisorToken,
+} from "./context.js";
 import { computerEgressMode, ensureRestrictedEgressEnforced } from "./egress.js";
 import { reclaimIdleComputerNetworks } from "./networks.js";
 import { supervisorApp } from "./routes.js";
+import { createScreenRelay } from "./screen-relay.js";
 
 export { supervisorApp };
+
+/**
+ * The supervisor's own API on a Node listener. The configured hostname builds the URL of a request
+ * that arrives without a Host header, which is what the former `serve({ hostname })` did for this
+ * app; without it Node's adapter refuses such a request as missing its host.
+ */
+export function supervisorApiListener(hostname: string) {
+  return getRequestListener(supervisorApp.fetch, { hostname });
+}
 
 async function startSupervisor() {
   const logger = await createRootLogger(SERVICE_NAMES.supervisor);
@@ -35,7 +53,19 @@ async function startSupervisor() {
   });
   const port = Number(process.env.SUPERVISOR_PORT ?? 7091);
   const hostname = process.env.SUPERVISOR_HOST ?? "127.0.0.1";
-  const server = serve({ fetch: supervisorApp.fetch, hostname, port }, () => {
+  // A computer whose home stays in its container may be reached over the network, so its screens
+  // come back through this listener: the one address the deployment already calls.
+  const relay =
+    computerHomeMode === "remote"
+      ? createScreenRelay({ secret: supervisorToken, homeMode: computerHomeMode, docker })
+      : undefined;
+  const api = supervisorApiListener(hostname);
+  const server = createServer((request, response) => {
+    if (relay?.handles(request)) void relay.request(request, response);
+    else void api(request, response);
+  });
+  relay?.attach(server);
+  server.listen(port, hostname, () => {
     logger.info("supervisor listening", { "http.host": hostname, "http.port": port });
   });
   let stopping = false;

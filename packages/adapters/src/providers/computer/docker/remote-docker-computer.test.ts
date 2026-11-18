@@ -1,4 +1,10 @@
 import type { AdapterContext } from "@rakazo/adapter-kit";
+import type { ScreenCapabilityScope } from "@rakazo/core/node/screen-capability";
+import {
+  openScreenCapability,
+  SCREEN_RELAY_HEADER,
+  sealScreenCapability,
+} from "@rakazo/core/node/screen-capability";
 import { describe, expect, it, vi } from "vitest";
 import { dockerComputer } from "./docker-computer.js";
 import { DockerSandboxProvider } from "./docker-sandbox.js";
@@ -15,6 +21,19 @@ const context: AdapterContext = {
 };
 
 const computer = { id: "computer", botId: "bot", providerRef: "computer" } as const;
+const screenCapabilityScope: ScreenCapabilityScope = {
+  botId: "bot",
+  computerId: "computer",
+  botGeneration: 2,
+  computerGeneration: 3,
+  controlLeaseId: null,
+};
+
+/** The answer a supervisor that relays its screens gives: a path on itself and a credential. */
+const relayedScreen = {
+  screenUrl: "/embed.html?path=websockify%3Ftoken%3Dview-token",
+  relayCredential: "relay-credential",
+};
 
 describe("remoteDockerSupervisorOrigin", () => {
   it("keeps an explicit http or https origin", () => {
@@ -186,4 +205,143 @@ describe("remote Docker sandbox", () => {
       vi.unstubAllGlobals();
     }
   });
+});
+
+describe("remote Docker screens", () => {
+  it("shows a remote screen through the supervisor's own origin", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json(relayedScreen)),
+    );
+    try {
+      const provider = new DockerSandboxProvider(
+        "https://supervisor.example.test",
+        "test-supervisor-token",
+        "remote-docker",
+      );
+      const session = await provider.connectScreen(
+        { ...computer, kind: "remote-docker" },
+        { view: "stream" },
+        context,
+      );
+      expect(session.url).toBe(
+        "https://supervisor.example.test/embed.html?path=websockify%3Ftoken%3Dview-token",
+      );
+      // The credential is the provider's own, and only the server proxy ever sends it.
+      expect(session.headers).toEqual({ [SCREEN_RELAY_HEADER]: "relay-credential" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("shows a remote terminal through the same relay", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          terminalUrl: "/embed.html?path=websockify%3Ftoken%3Dterminal-token",
+          relayCredential: "terminal-credential",
+        }),
+      ),
+    );
+    try {
+      const provider = new DockerSandboxProvider(
+        "https://supervisor.example.test",
+        "test-supervisor-token",
+        "remote-docker",
+      );
+      await expect(
+        provider.connectTerminal(
+          { ...computer, kind: "remote-docker" },
+          { controlToken: "human-control", cwd: "" },
+          context,
+        ),
+      ).resolves.toEqual({
+        url: "https://supervisor.example.test/embed.html?path=websockify%3Ftoken%3Dterminal-token",
+        headers: { [SCREEN_RELAY_HEADER]: "terminal-credential" },
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a local supervisor's published address and adds no credential", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          screenUrl: "http://127.0.0.1:49152/embed.html?path=websockify%3Ftoken%3Dview-token",
+        }),
+      ),
+    );
+    try {
+      const provider = new DockerSandboxProvider("http://supervisor.test", "test-supervisor-token");
+      const session = await provider.connectScreen(
+        { ...computer, kind: "docker" },
+        { view: "stream" },
+        context,
+      );
+      expect(session.url).toBe(
+        "http://127.0.0.1:49152/embed.html?path=websockify%3Ftoken%3Dview-token",
+      );
+      expect(session.headers).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(["https://supervisor.example.test", "http://10.0.0.5:7091"])(
+    "seals a relayed screen into a capability the proxy opens (%s)",
+    async (origin) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => Response.json(relayedScreen)),
+      );
+      try {
+        const provider = new DockerSandboxProvider(
+          origin,
+          "test-supervisor-token",
+          "remote-docker",
+        );
+        const session = await provider.connectScreen(
+          { ...computer, kind: "remote-docker" },
+          { view: "stream" },
+          context,
+        );
+        const sealed = new URL(
+          sealScreenCapability(
+            session.url!,
+            "screen-proxy-secret",
+            "https://app.example",
+            screenCapabilityScope,
+            100,
+            session.headers,
+          ),
+        );
+        // Only the relay's own page and socket are reachable, both on the supervisor's origin.
+        const supervisor = new URL(origin);
+        const page = openScreenCapability(
+          `${sealed.pathname}${sealed.search}`,
+          "screen-proxy-secret",
+          1_000,
+        );
+        expect(page?.target).toMatchObject({
+          protocol: supervisor.protocol,
+          hostname: supervisor.hostname,
+          // https needs no port; a plain one must be a private address on a port a screen allows.
+          port: Number(supervisor.port || (supervisor.protocol === "https:" ? 443 : 80)),
+          path: "/embed.html?path=websockify%3Ftoken%3Dview-token&view_only=true",
+          headers: { [SCREEN_RELAY_HEADER]: "relay-credential" },
+        });
+        const socket = openScreenCapability(
+          sealed.pathname.replace("/embed.html", "/websockify"),
+          "screen-proxy-secret",
+          1_000,
+        );
+        expect(socket?.target.path).toBe("/websockify?token=view-token");
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 });
