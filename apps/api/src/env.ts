@@ -284,8 +284,11 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     ),
     voiceSummaryMinChars: voiceSummaryMinCharsFromEnv(source.VOICE_SUMMARY_MIN_CHARS),
     sandboxSupervisorUrl: source.SANDBOX_SUPERVISOR_URL ?? "http://127.0.0.1:7091",
+    // remote-docker is selected only with an explicit origin, so it always has one here.
     sandboxSupervisorToken:
-      sandboxProvider === "docker" ? resolveSupervisorToken(source) : undefined,
+      sandboxProvider === "docker" || sandboxProvider === "remote-docker"
+        ? resolveSupervisorToken(source)
+        : undefined,
     screenProxySecret: resolveScreenProxySecret(source),
     sandboxProvider,
     cloudAgentProvider,

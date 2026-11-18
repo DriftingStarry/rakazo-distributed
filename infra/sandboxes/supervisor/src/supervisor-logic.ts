@@ -30,6 +30,8 @@ import type Docker from "dockerode";
 import { z } from "zod";
 import type { SandboxInput } from "./computer-spec.js";
 import { xdotoolCommand } from "./computer-spec.js";
+import type { ComputerHomeMode } from "./computers/home.js";
+import { labelsHomeMode } from "./computers/home.js";
 
 // Docker forwarding reaches the isolated container's bridge interface; loopback cannot serve it.
 const DOCKER_DESKTOP_ENV: DesktopEnvironment = { ...DEFAULT_DESKTOP_ENV, bindHost: "0.0.0.0" };
@@ -107,8 +109,12 @@ export function hasComputerIdentity(
   botId: string,
   spaceId: string,
 ) {
-  const labeledSpaceId = labels?.["rakazo.spaceId"] ?? labels?.["rakazo.workspaceId"];
-  return labels?.["rakazo.botId"] === botId && labeledSpaceId === spaceId;
+  return labels?.["rakazo.botId"] === botId && labeledSpaceId(labels) === spaceId;
+}
+
+/** The Space a computer's labels name, including the workspace label it used to carry. */
+export function labeledSpaceId(labels: Record<string, string> | undefined) {
+  return labels?.["rakazo.spaceId"] ?? labels?.["rakazo.workspaceId"];
 }
 
 export function hasValidBearerToken(authorization: string | undefined, expectedToken: string) {
@@ -806,13 +812,21 @@ export async function createComputerWithNameRetry<T>(
   }
 }
 
+/**
+ * A container this supervisor created for this bot and Space, in this supervisor's home mode. The
+ * mode keeps two deployments sharing a Docker host from adopting or removing each other's
+ * computers, including one that happens to hold the same name.
+ */
 export function isManagedComputer(
   info: Docker.ContainerInspectInfo,
   botId: string,
   spaceId: string,
   image: string,
+  homeMode: ComputerHomeMode,
 ) {
   const labels = info.Config.Labels ?? {};
   const managed = labels["rakazo.managed"] === "true" || info.Config.Image === image;
-  return managed && hasComputerIdentity(labels, botId, spaceId);
+  return (
+    managed && hasComputerIdentity(labels, botId, spaceId) && labelsHomeMode(labels) === homeMode
+  );
 }

@@ -4,10 +4,13 @@ import { simpleCommand } from "../../../computers/screens/linux-desktop.test-sup
 
 /**
  * An in-memory computer supervisor on a local port: computers that run until deleted, and a shell
- * that understands `env`, `echo` and `printenv`.
+ * that understands `env`, `echo` and `printenv`. A remote one keeps each home in the computer and
+ * refuses a provision request that names a server home path, as a remote supervisor does.
  */
-export async function emulatedDockerSupervisor() {
+export async function emulatedDockerSupervisor(options: { homeMode?: "local" | "remote" } = {}) {
+  const homeMode = options.homeMode ?? "local";
   const computers = new Set<string>();
+  const provisions: Array<{ homePath?: string }> = [];
   let sequence = 0;
   const server = createServer((request, response) => {
     let body = "";
@@ -22,6 +25,14 @@ export async function emulatedDockerSupervisor() {
       };
       if (collection !== "computers") return send(404, { error: "not found" });
       if (request.method === "POST" && !id) {
+        const provision = JSON.parse(body) as { homePath?: string };
+        provisions.push(provision);
+        if (homeMode === "remote" && provision.homePath !== undefined) {
+          return send(500, { error: "a remote supervisor keeps computer homes in the container" });
+        }
+        if (homeMode === "local" && !provision.homePath) {
+          return send(500, { error: "a local supervisor requires the computer home path" });
+        }
         const created = `computer-${++sequence}`;
         computers.add(created);
         return send(200, { id: created });
@@ -43,6 +54,7 @@ export async function emulatedDockerSupervisor() {
   const { port } = server.address() as AddressInfo;
   return {
     computers,
+    provisions,
     url: `http://127.0.0.1:${port}`,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };

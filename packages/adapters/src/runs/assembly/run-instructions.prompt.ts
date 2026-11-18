@@ -147,7 +147,8 @@ export function dockerComputerToolInstruction(
   disabled?: ReadonlySet<string>,
   offeredToolNames?: ReadonlySet<string>,
 ): string | undefined {
-  if (computerKind !== "docker") return undefined;
+  // A remote Docker computer runs the same image; only the supervisor hosting it differs.
+  if (computerKind !== "docker" && computerKind !== "remote-docker") return undefined;
   const navigate = builtinOffered(disabled, "browser_navigate");
   const act = builtinOffered(disabled, "browser_act");
   const takeover = builtinOffered(disabled, "request_takeover");

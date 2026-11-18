@@ -47,6 +47,8 @@ import { readBodyCapped, withAbort } from "../../../web/web-ssrf.js";
 export const MAX_SANDBOX_ERROR_RESPONSE_BYTES = 8 * 1024;
 export const MAX_SANDBOX_SUCCESS_RESPONSE_BYTES = 16 * 1024 * 1024;
 export const SCREEN_RELEASE_TIMEOUT_MS = 8_000;
+/** The computer kinds a supervisor manages: local Docker, and the same host reached remotely. */
+export type SupervisorDockerKind = "docker" | "remote-docker";
 /** How long a computer gets to run a trivial health check. */
 export const HEALTH_CHECK_TIMEOUT_MS = 10_000;
 const HOME_UNWRITABLE = "unwritable";
@@ -128,13 +130,15 @@ export class DockerSandboxProvider implements SandboxProvider {
   constructor(
     private readonly supervisorUrl: string,
     supervisorToken?: string,
+    /** The kind of computer this supervisor manages: a local Docker one, or a remote one. */
+    private readonly kind: SupervisorDockerKind = "docker",
   ) {
     this.supervisorToken = supervisorToken ?? resolveSupervisorToken(process.env);
   }
 
   describe() {
     return {
-      id: "docker",
+      id: this.kind,
       contractVersion: "1",
       adapterVersion: "0.1.0",
       capabilities: {
@@ -150,6 +154,14 @@ export class DockerSandboxProvider implements SandboxProvider {
 
   private url(path: string) {
     return `${this.supervisorUrl.replace(/\/$/, "")}${path}`;
+  }
+
+  /**
+   * Every supervisor call. A redirect is refused rather than followed, so an answer cannot send a
+   * call with this deployment's token to another host.
+   */
+  private request(path: string, init: RequestInit) {
+    return fetch(this.url(path), { redirect: "error", ...init });
   }
 
   private headers(context: AdapterContext, botId?: string) {
@@ -168,12 +180,15 @@ export class DockerSandboxProvider implements SandboxProvider {
     request: { botId: string; homePath: string; timezone?: string; language?: string },
     context: AdapterContext,
   ): Promise<ComputerRef> {
-    const res = await fetch(this.url("/computers"), {
+    // A remote supervisor keeps the home in the container's own writable layer, so the server's
+    // home path is not its business and it refuses a request that names one.
+    const homePath = this.kind === "remote-docker" ? undefined : request.homePath;
+    const res = await this.request("/computers", {
       method: "POST",
       headers: { ...this.headers(context, request.botId), "content-type": "application/json" },
       body: JSON.stringify({
         botId: request.botId,
-        homePath: request.homePath,
+        homePath,
         spaceId: context.spaceId,
         timezone: request.timezone,
         language: request.language,
@@ -196,7 +211,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     return {
       id: body.id,
       botId: request.botId,
-      kind: "docker",
+      kind: this.kind,
       providerRef: body.id,
       fresh: body.resumed !== true,
       ...(body.started === true ? { started: true } : {}),
@@ -212,7 +227,8 @@ export class DockerSandboxProvider implements SandboxProvider {
   }
 
   async isRunning(computer: ComputerRef, context: AdapterContext): Promise<boolean> {
-    if (computer.kind !== "docker") return false;
+    // A reference of another kind belongs to another deployment's supervisor.
+    if (computer.kind !== this.kind) return false;
     return (await this.containerRunning(computer, context)) === true;
   }
 
@@ -287,7 +303,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     const timeoutMs = boundedSandboxCommandTimeoutMs(request.timeoutMs);
     // The supervisor enforces timeoutMs; this only ends a command it never answers for.
     const streamSignal = AbortSignal.any([context.signal, AbortSignal.timeout(timeoutMs + 15_000)]);
-    const res = await fetch(this.url(`/computers/${computer.id}/exec`), {
+    const res = await this.request(`/computers/${computer.id}/exec`, {
       method: "POST",
       headers: { ...this.headers(context, computer.botId), "content-type": "application/json" },
       body: JSON.stringify({
@@ -339,11 +355,10 @@ export class DockerSandboxProvider implements SandboxProvider {
     request: PageBrowserCommand,
     context: AdapterContext,
   ): Promise<PageBrowserResult> {
-    const res = await fetch(this.url(`/computers/${computer.id}/browser`), {
+    const res = await this.request(`/computers/${computer.id}/browser`, {
       method: "POST",
       headers: { ...this.headers(context, computer.botId), "content-type": "application/json" },
       body: JSON.stringify(request),
-      redirect: "error",
       signal: context.signal,
     });
     if (!res.ok) {
@@ -367,7 +382,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     if (request.interactive && !request.controlToken) {
       throw new Error("interactive screen requires a control token");
     }
-    const res = await fetch(this.url(`/computers/${computer.id}/screen-mode`), {
+    const res = await this.request(`/computers/${computer.id}/screen-mode`, {
       method: "POST",
       headers: { ...this.headers(context, computer.botId), "content-type": "application/json" },
       body: JSON.stringify({
@@ -402,7 +417,7 @@ export class DockerSandboxProvider implements SandboxProvider {
   }
 
   async connectTerminal(computer: ComputerRef, request: TerminalRequest, context: AdapterContext) {
-    const res = await fetch(this.url(`/computers/${computer.id}/terminal`), {
+    const res = await this.request(`/computers/${computer.id}/terminal`, {
       method: "POST",
       headers: { ...this.headers(context, computer.botId), "content-type": "application/json" },
       body: JSON.stringify({ controlToken: request.controlToken, cwd: request.cwd ?? "" }),
@@ -422,7 +437,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     context: AdapterContext,
     controlToken?: string,
   ) {
-    const res = await fetch(this.url(`/computers/${computer.id}/screen-mode`), {
+    const res = await this.request(`/computers/${computer.id}/screen-mode`, {
       method: "POST",
       headers: { ...this.headers(context, computer.botId), "content-type": "application/json" },
       body: JSON.stringify({ interactive, controlToken }),
@@ -455,7 +470,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     context: AdapterContext,
   ): Promise<boolean | null> {
     try {
-      const res = await fetch(this.url(`/computers/${computer.id}`), {
+      const res = await this.request(`/computers/${computer.id}`, {
         method: "GET",
         headers: this.headers(context, computer.botId),
         signal: context.signal,
@@ -478,7 +493,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     lease: ControlLeaseRef,
     context: AdapterContext,
   ): Promise<void> {
-    const res = await fetch(this.url(`/computers/${computer.id}/input`), {
+    const res = await this.request(`/computers/${computer.id}/input`, {
       method: "POST",
       headers: { ...this.headers(context, computer.botId), "content-type": "application/json" },
       body: JSON.stringify({ input, leaseId: lease.leaseId }),
@@ -492,7 +507,7 @@ export class DockerSandboxProvider implements SandboxProvider {
   }
 
   async observe(computer: ComputerRef, context: AdapterContext): Promise<ComputerObservation> {
-    const res = await fetch(this.url(`/computers/${computer.id}/observe`), {
+    const res = await this.request(`/computers/${computer.id}/observe`, {
       method: "POST",
       headers: this.headers(context, computer.botId),
       signal: context.signal,
@@ -521,7 +536,7 @@ export class DockerSandboxProvider implements SandboxProvider {
 
   async act(computer: ComputerRef, request: ComputerActionRequest, context: AdapterContext) {
     const actions = boundedComputerActions(request.actions);
-    const res = await fetch(this.url(`/computers/${computer.id}/actions`), {
+    const res = await this.request(`/computers/${computer.id}/actions`, {
       method: "POST",
       headers: { ...this.headers(context, computer.botId), "content-type": "application/json" },
       body: JSON.stringify({
@@ -566,8 +581,8 @@ export class DockerSandboxProvider implements SandboxProvider {
     context: AdapterContext,
   ): Promise<ComputerFileEntry[]> {
     const path = normalizeWorkspacePath(directory);
-    const res = await fetch(
-      this.url(`/computers/${computer.id}/files?path=${encodeURIComponent(path)}&mode=list`),
+    const res = await this.request(
+      `/computers/${computer.id}/files?path=${encodeURIComponent(path)}&mode=list`,
       { headers: this.headers(context, computer.botId), signal: context.signal },
     );
     if (!res.ok) throw new Error(`sandbox file listing failed: ${res.status}`);
@@ -582,10 +597,8 @@ export class DockerSandboxProvider implements SandboxProvider {
   ) {
     const path = normalizeWorkspacePath(filePath);
     const maxBytes = options?.maxBytes;
-    const res = await fetch(
-      this.url(
-        `/computers/${computer.id}/files?path=${encodeURIComponent(path)}&mode=read${maxBytes === undefined ? "" : `&maxBytes=${maxBytes}`}`,
-      ),
+    const res = await this.request(
+      `/computers/${computer.id}/files?path=${encodeURIComponent(path)}&mode=read${maxBytes === undefined ? "" : `&maxBytes=${maxBytes}`}`,
       { headers: this.headers(context, computer.botId), signal: context.signal },
     );
     if (!res.ok) {
@@ -603,7 +616,7 @@ export class DockerSandboxProvider implements SandboxProvider {
   }
 
   async writeFile(computer: ComputerRef, file: PortableFile, context: AdapterContext) {
-    const res = await fetch(this.url(`/computers/${computer.id}/files`), {
+    const res = await this.request(`/computers/${computer.id}/files`, {
       method: "POST",
       headers: { ...this.headers(context, computer.botId), "content-type": "application/json" },
       body: JSON.stringify({
@@ -641,7 +654,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     const deadline = requestDeadline(SCREEN_RELEASE_TIMEOUT_MS, "sandbox screen release timed out");
     try {
       const res = await withAbort(
-        fetch(this.url(`/computers/${computer.id}/screen`), {
+        this.request(`/computers/${computer.id}/screen`, {
           method: "DELETE",
           headers: {
             ...this.headers(context, computer.botId),
@@ -669,7 +682,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     context: AdapterContext,
     options?: { discardUnsaved?: boolean },
   ): Promise<void> {
-    const res = await fetch(this.url(`/computers/${computer.id}/stop`), {
+    const res = await this.request(`/computers/${computer.id}/stop`, {
       method: "POST",
       headers: {
         ...this.headers(context, computer.botId),
@@ -687,7 +700,7 @@ export class DockerSandboxProvider implements SandboxProvider {
   }
 
   async destroy(computer: ComputerRef, context: AdapterContext): Promise<void> {
-    const res = await fetch(this.url(`/computers/${computer.id}`), {
+    const res = await this.request(`/computers/${computer.id}`, {
       method: "DELETE",
       headers: this.headers(context, computer.botId),
       signal: context.signal,

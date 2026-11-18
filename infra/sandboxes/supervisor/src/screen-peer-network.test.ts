@@ -2,6 +2,7 @@ import type * as NodeHttp from "node:http";
 import { Readable } from "node:stream";
 import { resolveSupervisorToken } from "@rakazo/core/node/secrets-guard";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { screenPeerNetworkConnectOptions } from "./computer-spec.js";
 
 const mocks = vi.hoisted(() => ({
   version: vi.fn(),
@@ -186,5 +187,19 @@ describe("isolated screen peer gateway priority through the supervisor route", (
       Container: "supervisor-peer",
       EndpointConfig: { GwPriority: -1 },
     });
+  });
+});
+
+describe("screen peer network connect payload", () => {
+  it("uses lower gateway priority only when Docker API supports it", () => {
+    for (const apiVersion of ["1.45", "1.47", "invalid"]) {
+      expect(screenPeerNetworkConnectOptions("peer", apiVersion)).toEqual({ Container: "peer" });
+    }
+    for (const apiVersion of ["1.48", "1.55", "2.0"]) {
+      expect(screenPeerNetworkConnectOptions("peer", apiVersion)).toEqual({
+        Container: "peer",
+        EndpointConfig: { GwPriority: -1 },
+      });
+    }
   });
 });

@@ -16,7 +16,6 @@ import {
 } from "./computer-locale.js";
 import {
   assertComputerMountSources,
-  assertVolumeSubpathSupport,
   COMPUTER_GID,
   COMPUTER_IMAGE,
   COMPUTER_UID,
@@ -25,14 +24,11 @@ import {
   computerBrowserProxyPacMatches,
   computerComputeGpusMatch,
   computerDnsMatches,
-  computerHomeStorage,
   computerMountsMatch,
   computerNetworkNameFor,
-  computerNetworkOwnerFor,
   containerCreateOptions,
   containerNameFor,
   controlPortPublicationMatches,
-  homeVolumeMatches,
   hostComputerUser,
   resolveSpaceComputerLimit,
   screenPorts,
@@ -40,9 +36,17 @@ import {
   xdotoolCommand,
 } from "./computer-spec.js";
 import {
+  assertVolumeSubpathSupport,
+  computerHomeMountMatches,
+  computerHomeStorage,
+  computerNetworkOwnerFor,
+  resolveProvisionHomePath,
+} from "./computers/home.js";
+import {
   computerBrowserProxyPacUrl,
   computerComputeGpus,
   computerDns,
+  computerHomeMode,
   computerMounts,
   controlViaLoopback,
   dataDir,
@@ -154,7 +158,8 @@ app.post("/computers", async (c) => {
   const body = z
     .object({
       botId: z.string().min(1),
-      homePath: z.string().min(1),
+      // Only a local supervisor mounts it; a remote one keeps the home in the container.
+      homePath: z.string().min(1).optional(),
       spaceId: z.string().min(1),
       ...computerLocaleFields,
     })
@@ -165,6 +170,7 @@ app.post("/computers", async (c) => {
       botId: body.botId,
       spaceId: body.spaceId,
     });
+    const requestedHomePath = resolveProvisionHomePath(computerHomeMode, body.homePath);
     return await withBotLifecycleLock(body.botId, async () => {
       await ensureComputerImage();
       await ensureRestrictedEgressEnforced();
@@ -176,19 +182,29 @@ app.post("/computers", async (c) => {
       );
       const networkMode = computerNetworkName(body.botId, runtimeInfo);
       const networkOwner = computerNetworkOwnerFor(dataDir, runtimeInfo);
-      const serviceHomePath = path.resolve(body.homePath);
-      assertBotHomePath(serviceHomePath, body.botId);
       const hostUid = process.getuid?.();
       const hostGid = process.getgid?.();
-      // The API normally creates the home. A non-root standalone supervisor may
-      // do so as the same user, but a root supervisor must never create or chown
-      // user-controlled paths at runtime; Compose data-init handles legacy data.
-      if (hostUid !== 0) await mkdir(serviceHomePath, { recursive: true });
-      const storage = computerHomeStorage(serviceHomePath, dataDir, runtimeInfo);
-      if (storage.homeVolume) {
-        assertVolumeSubpathSupport((await docker.version()).ApiVersion);
+      // A remote computer keeps its home in its own writable layer, so the server's data
+      // directory is not involved at all: no path to check, create or mount.
+      let serviceHomePath: string | undefined;
+      let storage: ReturnType<typeof computerHomeStorage> | undefined;
+      if (requestedHomePath !== undefined) {
+        serviceHomePath = path.resolve(requestedHomePath);
+        assertBotHomePath(serviceHomePath, body.botId);
+        // The API normally creates the home. A non-root standalone supervisor may
+        // do so as the same user, but a root supervisor must never create or chown
+        // user-controlled paths at runtime; Compose data-init handles legacy data.
+        if (hostUid !== 0) await mkdir(serviceHomePath, { recursive: true });
+        storage = computerHomeStorage(serviceHomePath, dataDir, runtimeInfo);
+        if (storage.homeVolume) {
+          assertVolumeSubpathSupport((await docker.version()).ApiVersion);
+        }
       }
-      const computerUser = runtimeInfo ? COMPUTER_USER : hostComputerUser(hostUid, hostGid);
+      // A remote home belongs to the image's own user, whichever user runs the supervisor.
+      const computerUser =
+        computerHomeMode === "remote" || runtimeInfo
+          ? COMPUTER_USER
+          : hostComputerUser(hostUid, hostGid);
       const existing = await findBotContainer(body.botId, body.spaceId);
       if (existing) {
         const info = await existing.inspect();
@@ -267,7 +283,8 @@ app.post("/computers", async (c) => {
           // And the bot browser's proxy auto-config.
           computerBrowserProxyPacMatches(info.Config.Env, computerBrowserProxyPacUrl) &&
           controlPublishOk &&
-          (!storage.homeVolume || homeVolumeMatches(info.HostConfig.Mounts, storage.homeVolume)) &&
+          // A local computer mounts the home volume it was created with; a remote one has no home mount.
+          computerHomeMountMatches(info, computerHomeMode, storage?.homeVolume) &&
           // A computer that cannot rejoin its network is replaced below instead.
           (!reconnect ||
             (await reconnectBotComputer(existing, body.botId, networkOwner, Boolean(endpoint))))
@@ -303,15 +320,18 @@ app.post("/computers", async (c) => {
         // Before replacing or creating a container, validate its home without
         // privileged filesystem mutations that could escape via concurrent renames.
         // Match hostComputerUser(): missing/root host identity falls back to 1000:1000.
-        const effectiveUid =
-          runtimeInfo || hostUid === undefined || hostGid === undefined || hostUid === 0
-            ? COMPUTER_UID
-            : hostUid;
-        const effectiveGid =
-          runtimeInfo || hostUid === undefined || hostGid === undefined || hostUid === 0
-            ? COMPUTER_GID
-            : hostGid;
-        await assertComputerHomeWritable(serviceHomePath, effectiveUid, effectiveGid);
+        // A remote computer has no server-side home to check.
+        if (serviceHomePath !== undefined) {
+          const effectiveUid =
+            runtimeInfo || hostUid === undefined || hostGid === undefined || hostUid === 0
+              ? COMPUTER_UID
+              : hostUid;
+          const effectiveGid =
+            runtimeInfo || hostUid === undefined || hostGid === undefined || hostUid === 0
+              ? COMPUTER_GID
+              : hostGid;
+          await assertComputerHomeWritable(serviceHomePath, effectiveUid, effectiveGid);
+        }
         const name = containerNameFor(body.botId);
         const createdNetwork =
           screenNetworkMode === "internal"
@@ -323,6 +343,7 @@ app.post("/computers", async (c) => {
           botId: body.botId,
           spaceId: body.spaceId,
           ...storage,
+          homeMode: computerHomeMode,
           user: computerUser,
           networkMode,
           controlToken: randomUUID(),

@@ -9,11 +9,11 @@ import {
   COMPUTER_IMAGE,
   computerBridgeNameFor,
   computerNetworkNameFor,
-  computerNetworkOwnerFor,
   containerNameFor,
   hostComputerUser,
   screenPorts,
 } from "./computer-spec.js";
+import { computerNetworkOwnerFor } from "./computers/home.js";
 
 const mocks = vi.hoisted(() => ({
   docker: {

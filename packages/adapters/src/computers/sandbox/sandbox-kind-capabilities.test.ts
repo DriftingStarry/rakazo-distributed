@@ -27,6 +27,7 @@ type Row = [
 const EXPECTED: Record<KnownSandboxKind, Row> = {
   none: [false, false, false, false, DEFAULT_SCREEN, "never", false, false],
   docker: [true, true, false, false, DEFAULT_SCREEN, "always", false, true],
+  "remote-docker": [true, true, false, false, DEFAULT_SCREEN, "never", true, false],
   e2b: [true, true, false, false, DEFAULT_SCREEN, "never", true, false],
   novita: [true, true, false, false, DEFAULT_SCREEN, "never", true, false],
   daytona: [true, true, false, false, DEFAULT_SCREEN, "never", true, false],

@@ -1,8 +1,9 @@
 import path from "node:path";
 import type Docker from "dockerode";
 import { COMPUTER_IMAGE } from "./computer-spec.js";
-import { dataDir, docker } from "./context.js";
-import { isManagedComputer } from "./supervisor-logic.js";
+import { labelsHomeMode } from "./computers/home.js";
+import { computerHomeMode, dataDir, docker } from "./context.js";
+import { isManagedComputer, labeledSpaceId } from "./supervisor-logic.js";
 
 export async function findBotContainer(botId: string, spaceId: string) {
   const listed = await docker.listContainers({
@@ -39,9 +40,10 @@ async function isManagedSpaceContainer(
 ): Promise<boolean> {
   const labels = item.Labels;
   if (labels) {
-    const listedSpaceId = labels["rakazo.spaceId"] ?? labels["rakazo.workspaceId"];
     // Labeled for another space (or no space identity) cannot count toward this cap.
-    if (listedSpaceId !== spaceId) return false;
+    if (labeledSpaceId(labels) !== spaceId) return false;
+    // Nor does another deployment's mode, which this supervisor's cap does not cover.
+    if (labelsHomeMode(labels) !== computerHomeMode) return false;
     if (labels["rakazo.managed"] === "true" || item.Image === COMPUTER_IMAGE) return true;
     // Space matches but Image may be an ID after the tag moved — confirm via inspect.
   }
@@ -51,8 +53,11 @@ async function isManagedSpaceContainer(
     const infoLabels = info.Config?.Labels ?? {};
     const managed =
       infoLabels["rakazo.managed"] === "true" || info.Config?.Image === COMPUTER_IMAGE;
-    const infoSpaceId = infoLabels["rakazo.spaceId"] ?? infoLabels["rakazo.workspaceId"];
-    return managed && infoSpaceId === spaceId;
+    return (
+      managed &&
+      labeledSpaceId(infoLabels) === spaceId &&
+      labelsHomeMode(infoLabels) === computerHomeMode
+    );
   } catch {
     // Container might have been removed concurrently
     return false;
@@ -75,7 +80,7 @@ export function isRakazoContainer(
   botId: string,
   spaceId: string,
 ) {
-  return isManagedComputer(info, botId, spaceId, COMPUTER_IMAGE);
+  return isManagedComputer(info, botId, spaceId, COMPUTER_IMAGE, computerHomeMode);
 }
 
 export function assertBotHomePath(homePath: string, botId: string) {

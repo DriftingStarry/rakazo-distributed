@@ -1295,7 +1295,7 @@ describe("computer name recovery", () => {
       removeOwnedComputer(
         { inspect } as Pick<Docker.Container, "inspect">,
         remove,
-        (candidate) => isManagedComputer(candidate, "bot", "space", "computer"),
+        (candidate) => isManagedComputer(candidate, "bot", "space", "computer", "local"),
         cleared,
       );
     return { remove, cleared, inspect, reclaim };
@@ -1332,8 +1332,27 @@ describe("computer name recovery", () => {
         "bot",
         "space",
         "computer",
+        "local",
       ),
     ).toBe(true);
+  });
+
+  it("never claims another deployment's computer, even under the same name", async () => {
+    const remote = { ...owned, "rakazo.homeMode": "remote" };
+    // A remote host sees the local computer that holds its name as somebody else's.
+    expect(isManagedComputer(holder(remote), "bot", "space", "computer", "remote")).toBe(true);
+    expect(isManagedComputer(holder(remote), "bot", "space", "computer", "local")).toBe(false);
+    expect(isManagedComputer(holder(owned), "bot", "space", "computer", "remote")).toBe(false);
+    const { remove } = recovery(holder(owned));
+    const crossMode = () =>
+      removeOwnedComputer(
+        { inspect: async () => holder(owned) } as Pick<Docker.Container, "inspect">,
+        remove,
+        (candidate) => isManagedComputer(candidate, "bot", "space", "computer", "remote"),
+        vi.fn(),
+      );
+    await expect(crossMode()).resolves.toBe(false);
+    expect(remove).not.toHaveBeenCalled();
   });
 
   it("preserves the original error when inspection or removal fails", async () => {

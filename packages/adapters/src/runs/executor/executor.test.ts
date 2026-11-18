@@ -1896,6 +1896,10 @@ describe("dockerComputerToolInstruction", () => {
     expect(dockerComputerToolInstruction("docker")).toContain("without sudo");
     expect(dockerComputerToolInstruction("docker")).toContain("`python3`");
     expect(dockerComputerToolInstruction("docker", new Set(["shell"]))).not.toContain("`python3`");
+    // A remote Docker computer runs the same image.
+    expect(dockerComputerToolInstruction("remote-docker")).toBe(
+      dockerComputerToolInstruction("docker"),
+    );
     expect(dockerComputerToolInstruction("desktop")).toBeUndefined();
     expect(dockerComputerToolInstruction("e2b")).toBeUndefined();
   });

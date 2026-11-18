@@ -21,23 +21,19 @@ import {
 import type Docker from "dockerode";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  assertVolumeSubpathSupport,
   COMPUTER_IMAGE,
   COMPUTER_IMAGE_CONTEXT_FILES,
   computerBridgeNameFor,
   computerBrowserProxyPacMatches,
   computerComputeGpusMatch,
   computerDnsMatches,
-  computerHomeStorage,
   computerMountsMatch,
   computerNetworkCreateOptions,
   computerNetworkNameFor,
   computerNetworkNamesForCleanup,
-  computerNetworkOwnerFor,
   containerCreateOptions,
   containerNameFor,
   controlPortPublicationMatches,
-  homeVolumeMatches,
   hostComputerUser,
   isIpv6NetworkUnavailable,
   isRegistryQualifiedImage,
@@ -55,12 +51,12 @@ import {
   resolveScreenPublishTarget,
   resolveSpaceComputerLimit,
   resolveTeamScreenLimit,
-  screenPeerNetworkConnectOptions,
   screenPorts,
   screenUrlFor,
   screenUrlWithToken,
   xdotoolCommand,
 } from "./computer-spec.js";
+import { computerHomeMountMatches, containerHomeMode } from "./computers/home.js";
 
 describe("graphical computer spec", () => {
   it("binds the embed WebSocket path to the current screen capability", () => {
@@ -422,6 +418,49 @@ describe("graphical computer spec", () => {
     expect(match([home, docs, { ...shares, BindOptions: undefined }])).toBe(false);
     // And one created before its sources were labeled, since its source cannot be read back.
     expect(match([home, docs, shares], desired, [])).toBe(false);
+  });
+
+  it("keeps a remote computer's home in its own writable layer", () => {
+    const options = containerCreateOptions({
+      name: "rakazo-bot-remote",
+      image: COMPUTER_IMAGE,
+      botId: "remote",
+      spaceId: "s",
+      homeMode: "remote",
+      user: "1000:1000",
+      mounts: resolveComputerMounts("/srv/docs:/mnt/docs:ro"),
+    });
+    expect(options.Labels).toMatchObject({ "rakazo.homeMode": "remote" });
+    // No /home/rakazo mount of either kind: the image's own directory is the home.
+    expect(options.HostConfig.Binds).toBeUndefined();
+    expect(options.HostConfig.Mounts).toEqual([
+      { Type: "bind", Source: "/srv/docs", Target: "/mnt/docs", ReadOnly: true },
+    ]);
+    expect(containerHomeMode({ Config: options } as unknown as Docker.ContainerInspectInfo)).toBe(
+      "remote",
+    );
+    expect(
+      computerHomeMountMatches(
+        { HostConfig: options.HostConfig } as unknown as Pick<
+          Docker.ContainerInspectInfo,
+          "HostConfig"
+        >,
+        "remote",
+        undefined,
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps ordinary Docker on the mounted server home", () => {
+    const options = containerCreateOptions({
+      name: "rakazo-bot-local",
+      image: COMPUTER_IMAGE,
+      botId: "local",
+      spaceId: "s",
+      homePath: "/data/homes/local",
+    });
+    expect(options.Labels).toMatchObject({ "rakazo.homeMode": "local" });
+    expect(options.HostConfig.Binds).toEqual(["/data/homes/local:/home/rakazo"]);
   });
 
   it("mounts read-only unless rw is explicit", () => {
@@ -2453,172 +2492,5 @@ describe("computer resource limits", () => {
 
   it("parses byte counts without a unit suffix", () => {
     expect(parseMemoryBytes("X", "1073741824")).toBe(1024 ** 3);
-  });
-});
-
-describe("computer home storage", () => {
-  const runtime = (mount: object) => ({ Mounts: [mount] }) as Docker.ContainerInspectInfo;
-  it("keeps named volumes native and exposes only the bot subdirectory", () => {
-    const storage = computerHomeStorage(
-      "/data/homes/bot",
-      "/data",
-      runtime({
-        Type: "volume",
-        Name: "example_appdata",
-        Source: "/var/lib/docker/volumes/example_appdata/_data",
-        Destination: "/data",
-      }),
-    );
-    const options = containerCreateOptions({
-      name: "bot",
-      image: "computer",
-      botId: "bot",
-      spaceId: "space",
-      ...storage,
-    });
-    expect(options.HostConfig.Binds).toBeUndefined();
-    expect(options.HostConfig.Mounts).toEqual([
-      {
-        Type: "volume",
-        Source: "example_appdata",
-        Target: "/home/rakazo",
-        VolumeOptions: { NoCopy: true, Subpath: "homes/bot" },
-      },
-    ]);
-    expect(homeVolumeMatches(options.HostConfig.Mounts, storage.homeVolume!)).toBe(true);
-    expect(homeVolumeMatches(undefined, storage.homeVolume!)).toBe(false);
-    expect(
-      homeVolumeMatches(options.HostConfig.Mounts, {
-        name: "example_appdata",
-        subpath: "homes/other",
-      }),
-    ).toBe(false);
-  });
-  it("preserves native host paths and translates supervisor bind mounts", () => {
-    expect(computerHomeStorage("/data/homes/bot", "/data", undefined)).toEqual({
-      homePath: "/data/homes/bot",
-    });
-    expect(
-      computerHomeStorage(
-        "/data/homes/bot",
-        "/data",
-        runtime({ Type: "bind", Source: "/srv/data", Destination: "/data" }),
-      ),
-    ).toEqual({ homePath: "/srv/data/homes/bot" });
-  });
-  it("rejects paths outside the volume and missing volume names", () => {
-    for (const home of ["/data", "/other", "/data/../other"])
-      expect(() => computerHomeStorage(home, "/data", undefined)).toThrow();
-    expect(() =>
-      computerHomeStorage(
-        "/data/homes/bot",
-        "/data",
-        runtime({ Type: "volume", Destination: "/data" }),
-      ),
-    ).toThrow(/no name/);
-  });
-  it("derives the network owner from where computer homes live, without exposing it", () => {
-    const volume = (name: string) =>
-      runtime({
-        Type: "volume",
-        Name: name,
-        Source: `/var/lib/docker/volumes/${name}/_data`,
-        Destination: "/data",
-      });
-    const owner = computerNetworkOwnerFor("/data", volume("example_appdata"));
-    expect(owner).toMatch(/^[0-9a-f]{32}$/);
-    expect(computerNetworkOwnerFor("/data", volume("example_appdata"))).toBe(owner);
-    expect(computerNetworkOwnerFor("/data", volume("other_appdata"))).not.toBe(owner);
-    const hostRun = computerNetworkOwnerFor("/srv/install-a/data", undefined);
-    expect(computerNetworkOwnerFor("/srv/install-b/data", undefined)).not.toBe(hostRun);
-    expect(
-      computerNetworkOwnerFor(
-        "/data",
-        runtime({ Type: "bind", Source: "/srv/install-a/data", Destination: "/data" }),
-      ),
-    ).toBe(hostRun);
-  });
-  it("uses lower gateway priority only when Docker API supports it", () => {
-    for (const apiVersion of ["1.45", "1.47", "invalid"]) {
-      expect(screenPeerNetworkConnectOptions("peer", apiVersion)).toEqual({ Container: "peer" });
-    }
-    for (const apiVersion of ["1.48", "1.55", "2.0"]) {
-      expect(screenPeerNetworkConnectOptions("peer", apiVersion)).toEqual({
-        Container: "peer",
-        EndpointConfig: { GwPriority: -1 },
-      });
-    }
-  });
-
-  it("fails closed on daemons that could ignore volume subpaths", () => {
-    for (const version of ["1.44", "", "invalid", "0.99"])
-      expect(() => assertVolumeSubpathSupport(version)).toThrow(/Docker Engine 26/);
-    for (const version of ["1.45", "1.46", "2.0"])
-      expect(() => assertVolumeSubpathSupport(version)).not.toThrow();
-  });
-
-  it("supervises computer control with a bounded restart delay", () => {
-    const start = readFileSync(
-      path.resolve(import.meta.dirname, "../../computer/start.sh"),
-      "utf8",
-    );
-    expect(start).toMatch(
-      /while true; do\s+\/usr\/local\/bin\/rakazo-computer-control\s+sleep 1\s+done >\/tmp\/rakazo\/control\.log 2>&1 &/,
-    );
-    // PID 1 terminates both the background loop and its current child on stop.
-    expect(start).toContain("kill -TERM -- -1");
-  });
-
-  it.skipIf(process.platform === "win32")(
-    "restarts computer control after an abnormal exit",
-    () => {
-      const start = readFileSync(
-        path.resolve(import.meta.dirname, "../../computer/start.sh"),
-        "utf8",
-      );
-      const loop = start.match(
-        /while true; do[\s\S]*?done >\/tmp\/rakazo\/control\.log 2>&1 &/,
-      )?.[0];
-      expect(loop).toBeDefined();
-      const result = spawnSync(
-        "bash",
-        [
-          "-c",
-          [
-            "attempts=0",
-            "control() { echo control; return 137; }",
-            'sleep() { echo "delay $1"; attempts=$((attempts + 1)); if [ "$attempts" -eq 2 ]; then exit 0; fi; }',
-            loop
-              ?.replace("/usr/local/bin/rakazo-computer-control", "control")
-              .replace(" >/tmp/rakazo/control.log 2>&1 &", ""),
-          ].join("\n"),
-        ],
-        { encoding: "utf8", timeout: 5_000 },
-      );
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toBe("control\ndelay 1\ncontrol\ndelay 1\n");
-    },
-  );
-
-  it("stops promptly when Docker sends SIGTERM to the start script", () => {
-    const root = path.resolve(import.meta.dirname, "../../computer");
-    const start = readFileSync(path.join(root, "start.sh"), "utf8");
-    expect(start).toMatch(/trap shutdown TERM INT/);
-    expect(start).toMatch(/kill -TERM "\$XVFB_PID"/);
-    expect(start).not.toMatch(/while kill -0 "\$XVFB_PID"/);
-    // The handler must be in place before the first child process starts, so a stop that
-    // arrives during startup is honoured instead of waiting for Docker's grace period.
-    const trapAt = start.indexOf("trap shutdown TERM INT");
-    const firstChildAt = start.search(/^[^#\n]*&\s*$/m);
-    expect(trapAt).toBeGreaterThan(-1);
-    expect(firstChildAt).toBeGreaterThan(-1);
-    expect(trapAt).toBeLessThan(firstChildAt);
-    // A stop before Xvfb exists must not try to signal or wait on an empty PID.
-    expect(start).toMatch(/^XVFB_PID=""$/m);
-    expect(start.match(/if \[\[ -n "\$XVFB_PID" \]\]; then/g)?.length ?? 0).toBeGreaterThanOrEqual(
-      2,
-    );
-    // Steady state waits on Xvfb instead of polling, so the trap runs immediately.
-    expect(start).toMatch(/^wait "\$XVFB_PID"$/m);
   });
 });
