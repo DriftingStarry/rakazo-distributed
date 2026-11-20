@@ -10,14 +10,15 @@ keep their computer. Private Computers count toward `SANDBOX_MAX_COMPUTERS_PER_U
 
 ## Quick pick
 
-| Goal                                                    | Set                                                                      | Also need                                                                                                                             |
-| ------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Local Docker computers                                  | `SANDBOX_PROVIDER=docker`                                                | `SANDBOX_SUPERVISOR_TOKEN`, computer image, Docker socket for supervisor                                                              |
-| UI only, no computers                                   | `SANDBOX_PROVIDER=none`                                                  | No provider credential; published-images Compose still requires `SANDBOX_SUPERVISOR_TOKEN`                                            |
-| Managed remote desktop                                  | `e2b` / `novita` / `daytona` / `createos` / `boat` / `boxd` / `instabox` | `SANDBOX_SUPERVISOR_TOKEN` (published-images Compose), matching API key (and optional URL knobs for Daytona/CreateOS/Boat)            |
-| One pod per computer on your own cluster                | `SANDBOX_PROVIDER=kubernetes`                                            | API and worker running in the cluster, a namespace and a Role that can create, read, delete and exec into pods                        |
-| One app container per computer on your own Incus server | `SANDBOX_PROVIDER=incus`                                                 | Incus API address, a client certificate restricted to one project, and a route from the API, worker and web to the computers' network |
-| One VM per computer on an Apple silicon Mac             | `SANDBOX_PROVIDER=local-vm`                                              | macOS 26 or newer and Apple's `container` runtime with its system service started                                                     |
+| Goal                                                    | Set                                                                      | Also need                                                                                                                              |
+| ------------------------------------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Local Docker computers                                  | `SANDBOX_PROVIDER=docker`                                                | `SANDBOX_SUPERVISOR_TOKEN`, computer image, Docker socket for supervisor                                                               |
+| Computers on another host's Docker                      | `SANDBOX_PROVIDER=remote-docker`                                         | Explicit `SANDBOX_SUPERVISOR_URL` origin, the same `SANDBOX_SUPERVISOR_TOKEN`, and `SANDBOX_SUPERVISOR_REMOTE=true` on that supervisor |
+| UI only, no computers                                   | `SANDBOX_PROVIDER=none`                                                  | No provider credential; published-images Compose still requires `SANDBOX_SUPERVISOR_TOKEN`                                             |
+| Managed remote desktop                                  | `e2b` / `novita` / `daytona` / `createos` / `boat` / `boxd` / `instabox` | `SANDBOX_SUPERVISOR_TOKEN` (published-images Compose), matching API key (and optional URL knobs for Daytona/CreateOS/Boat)             |
+| One pod per computer on your own cluster                | `SANDBOX_PROVIDER=kubernetes`                                            | API and worker running in the cluster, a namespace and a Role that can create, read, delete and exec into pods                         |
+| One app container per computer on your own Incus server | `SANDBOX_PROVIDER=incus`                                                 | Incus API address, a client certificate restricted to one project, and a route from the API, worker and web to the computers' network  |
+| One VM per computer on an Apple silicon Mac             | `SANDBOX_PROVIDER=local-vm`                                              | macOS 26 or newer and Apple's `container` runtime with its system service started                                                      |
 
 Published-images [Compose](../infra/compose/docker-compose.images.yml) defaults to **`docker`**.
 It always starts the supervisor and requires `SANDBOX_SUPERVISOR_TOKEN`, including for `none`
@@ -133,6 +134,43 @@ has no Widevine. Some payment and sign-in risk checks may count that profile aga
 
 Browser identity is only one input to bot-check challenges; the host's IP reputation usually
 matters more.
+
+## `remote-docker` (supervisor on another host)
+
+`SANDBOX_PROVIDER=remote-docker` runs the same computers as `docker`, but the supervisor runs on a
+Docker host the API and worker reach over the network. Start that supervisor with
+`SANDBOX_SUPERVISOR_REMOTE=true` (same app image, its own computer image, its own
+`SANDBOX_SUPERVISOR_TOKEN`), and point the API and worker at it:
+
+```env
+SANDBOX_PROVIDER=remote-docker
+SANDBOX_SUPERVISOR_URL=https://sandbox.example.com
+SANDBOX_SUPERVISOR_TOKEN=<the token that supervisor requires>
+```
+
+- `SANDBOX_SUPERVISOR_URL` must be an http(s) origin, with no credentials, query, fragment or
+  path. Without it the deployment runs no computers instead of quietly calling this host, and the
+  API and worker follow no redirect from it.
+- The API, the worker and the web server must reach that origin, and the remote supervisor needs
+  the Docker daemon that runs the computers. Keep it private, as the in-stack supervisor is.
+- Each computer keeps its home in its own container instead of `DATA_DIR`. Stopping and starting it
+  keeps that home; a computer the supervisor has to replace is rebuilt and then restored from the
+  last saved workspace, so a save is the only copy that survives losing the container.
+- A remote supervisor refuses a provision request that names a server home path, and a local one
+  refuses a request without it. Each computer records the mode it was created in, so two
+  deployments sharing a Docker host never adopt or remove each other's computers, even when their
+  names collide.
+- Live screens and terminals are relayed through that supervisor's own origin, the address the API
+  and worker already call: it answers with a short-lived credential naming one screen of one
+  computer, which only the web server sends and no browser ever sees, and the relay reaches nothing
+  the credential does not name. Reach the origin over HTTPS, or from the web server over a private
+  plain-HTTP address above port 1023 (`http://10.0.0.5:7091`; the screen proxy refuses plain HTTP to
+  a DNS name, so live screens and terminals need an IP literal or HTTPS, though provisioning and
+  command execution still work); a screen ends when its computer restarts, when the person holding
+  it changes, or when the API revokes it.
+
+The standalone Compose file, firewall and egress checklist, and backup notes are in
+[Supervisor on another host](./self-host-docker-computers.md#supervisor-on-another-host).
 
 ## `kubernetes`
 

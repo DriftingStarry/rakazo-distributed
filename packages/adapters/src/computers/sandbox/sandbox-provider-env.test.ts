@@ -133,6 +133,34 @@ describe("resolveSandboxProvider", () => {
       }),
     ).toBe("docker");
   });
+
+  it("runs computers on a remote supervisor only with its explicit origin", () => {
+    expect(resolveSandboxProvider({ SANDBOX_PROVIDER: "remote-docker" })).toBe("none");
+    expect(
+      resolveSandboxProvider({
+        SANDBOX_PROVIDER: "remote-docker",
+        SANDBOX_SUPERVISOR_URL: "https://supervisor.example.test",
+      }),
+    ).toBe("remote-docker");
+    expect(() =>
+      resolveSandboxProvider({
+        SANDBOX_PROVIDER: "remote-docker",
+        SANDBOX_SUPERVISOR_URL: "https://supervisor.example.test/computers",
+      }),
+    ).toThrow(/SANDBOX_SUPERVISOR_URL/);
+  });
+
+  it("keeps remote-docker in production only with the supervisor token", () => {
+    const remote = {
+      NODE_ENV: "production",
+      SANDBOX_PROVIDER: "remote-docker",
+      SANDBOX_SUPERVISOR_URL: "https://supervisor.example.test",
+    };
+    expect(resolveSandboxProvider(remote)).toBe("none");
+    expect(
+      resolveSandboxProvider({ ...remote, SANDBOX_SUPERVISOR_TOKEN: "remote-supervisor-token" }),
+    ).toBe("remote-docker");
+  });
 });
 
 describe("sandboxProviderOptionsFromEnv", () => {

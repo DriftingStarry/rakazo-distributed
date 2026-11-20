@@ -35,13 +35,16 @@ import { assertSandboxWorkspaceContract, provisionPrepared } from "./sandbox-tes
 
 let restoreFetch: () => void;
 let supervisor: Awaited<ReturnType<typeof emulatedDockerSupervisor>>;
+let remoteSupervisor: Awaited<ReturnType<typeof emulatedDockerSupervisor>>;
 beforeAll(async () => {
   restoreFetch = routeFakeBoatDownloads();
   supervisor = await emulatedDockerSupervisor();
+  remoteSupervisor = await emulatedDockerSupervisor({ homeMode: "remote" });
 });
 afterAll(async () => {
   restoreFetch();
   await supervisor.close();
+  await remoteSupervisor.close();
 });
 
 const ctx = {
@@ -104,6 +107,12 @@ const fixtures: Record<KnownSandboxKind, SandboxConformanceFixture> = {
   createos: { provider: () => emulatedCreateOS().provider, workspace: false, unsetEnv: true },
   docker: {
     provider: () => new DockerSandboxProvider(supervisor.url, "test-supervisor-token"),
+    workspace: false,
+    unsetEnv: true,
+  },
+  "remote-docker": {
+    provider: () =>
+      new DockerSandboxProvider(remoteSupervisor.url, "test-supervisor-token", "remote-docker"),
     workspace: false,
     unsetEnv: true,
   },

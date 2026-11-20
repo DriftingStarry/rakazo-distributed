@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -9,7 +10,7 @@ import { deferred } from "@rakazo/core/test-async";
 import type Docker from "dockerode";
 import { describe, expect, it, vi } from "vitest";
 import { resolveDockerSocketPath } from "./context.js";
-import { supervisorApp } from "./index.js";
+import { supervisorApiListener, supervisorApp } from "./index.js";
 import { waitForScreenReady } from "./readiness.js";
 import {
   MAX_SUPERVISOR_FILE_REQUEST_BYTES,
@@ -1295,7 +1296,7 @@ describe("computer name recovery", () => {
       removeOwnedComputer(
         { inspect } as Pick<Docker.Container, "inspect">,
         remove,
-        (candidate) => isManagedComputer(candidate, "bot", "space", "computer"),
+        (candidate) => isManagedComputer(candidate, "bot", "space", "computer", "local"),
         cleared,
       );
     return { remove, cleared, inspect, reclaim };
@@ -1332,8 +1333,27 @@ describe("computer name recovery", () => {
         "bot",
         "space",
         "computer",
+        "local",
       ),
     ).toBe(true);
+  });
+
+  it("never claims another deployment's computer, even under the same name", async () => {
+    const remote = { ...owned, "rakazo.homeMode": "remote" };
+    // A remote host sees the local computer that holds its name as somebody else's.
+    expect(isManagedComputer(holder(remote), "bot", "space", "computer", "remote")).toBe(true);
+    expect(isManagedComputer(holder(remote), "bot", "space", "computer", "local")).toBe(false);
+    expect(isManagedComputer(holder(owned), "bot", "space", "computer", "remote")).toBe(false);
+    const { remove } = recovery(holder(owned));
+    const crossMode = () =>
+      removeOwnedComputer(
+        { inspect: async () => holder(owned) } as Pick<Docker.Container, "inspect">,
+        remove,
+        (candidate) => isManagedComputer(candidate, "bot", "space", "computer", "remote"),
+        vi.fn(),
+      );
+    await expect(crossMode()).resolves.toBe(false);
+    expect(remove).not.toHaveBeenCalled();
   });
 
   it("preserves the original error when inspection or removal fails", async () => {
@@ -1370,5 +1390,37 @@ describe("computer name recovery", () => {
     ).rejects.toBe(error);
     expect(create).toHaveBeenCalledTimes(1);
     expect(reclaim).not.toHaveBeenCalled();
+  });
+});
+
+describe("supervisor listener", () => {
+  it("answers a request with no Host header at the configured hostname", async () => {
+    // The former serve({ hostname }) gave Node's adapter the host to build a URL from, so a client
+    // that omits Host is answered instead of refused as missing it. Node refuses such a request
+    // itself unless the server allows it, so the listener is the only thing under test here.
+    const server = http.createServer(
+      { requireHostHeader: false },
+      supervisorApiListener("127.0.0.1"),
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected a TCP address");
+    const socket = net.connect(address.port, "127.0.0.1");
+    const received: string[] = [];
+    socket.setEncoding("latin1");
+    socket.on("data", (chunk: string) => received.push(chunk));
+    socket.on("error", () => undefined);
+    try {
+      await once(socket, "connect");
+      socket.write("GET /health HTTP/1.1\r\nconnection: close\r\n\r\n");
+      await once(socket, "close");
+      const answer = received.join("");
+      expect(answer).toMatch(/^HTTP\/1\.1 200/);
+      expect(answer).toContain('"ok":true');
+    } finally {
+      socket.destroy();
+      server.closeAllConnections();
+      server.close();
+    }
   });
 });

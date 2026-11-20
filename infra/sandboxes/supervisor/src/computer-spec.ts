@@ -9,6 +9,8 @@ import {
 import type Docker from "dockerode";
 import type { ComputerLocale } from "./computer-locale.js";
 import { computerLocaleEnv } from "./computer-locale.js";
+import type { ComputerHomeMode } from "./computers/home.js";
+import { COMPUTER_HOME_MODE_LABEL } from "./computers/home.js";
 
 /**
  * The computer image. RAKAZO_COMPUTER_IMAGE_TAG is appended the way Compose does, so a
@@ -507,21 +509,6 @@ export function computerBridgeNameFor(botId: string) {
 }
 
 /**
- * Owner label for this install's computer networks, which can share a Docker host
- * with other installs that name theirs the same way. It is derived from where the
- * computer homes live (see computerHomeStorage) and hashed to keep host paths out.
- */
-export function computerNetworkOwnerFor(
-  dataDir: string,
-  info: Docker.ContainerInspectInfo | undefined,
-) {
-  const mount = info?.Mounts.find((entry) => entry.Destination === dataDir);
-  const root =
-    mount?.Type === "volume" ? `volume:${mount.Name}` : `path:${mount?.Source ?? dataDir}`;
-  return createHash("sha256").update(root).digest("hex").slice(0, 32);
-}
-
-/**
  * Whether a network-create failure means this daemon may be unable to create
  * dual-stack networks: every capability error the daemon emits names IPv6 or
  * ip6tables ("could not find an available, non-overlapping IPv6 address pool…",
@@ -605,58 +592,16 @@ export function computerPortBindings(publishControlPort = false) {
   return { ExposedPorts, PortBindings };
 }
 
-export function computerHomeStorage(
-  serviceHomePath: string,
-  dataDir: string,
-  info: Docker.ContainerInspectInfo | undefined,
-): { homePath: string; homeVolume?: { name: string; subpath: string } } {
-  const relative = path.relative(dataDir, serviceHomePath);
-  if (
-    !relative ||
-    relative === ".." ||
-    relative.startsWith(`..${path.sep}`) ||
-    path.isAbsolute(relative)
-  ) {
-    throw new Error("computer home must be inside the data directory");
-  }
-  const mount = info?.Mounts.find((entry) => entry.Destination === dataDir);
-  if (mount?.Type === "volume") {
-    if (!mount.Name) throw new Error("computer data volume has no name");
-    return { homePath: serviceHomePath, homeVolume: { name: mount.Name, subpath: relative } };
-  }
-  return { homePath: mount?.Source ? path.join(mount.Source, relative) : serviceHomePath };
-}
-
-export function assertVolumeSubpathSupport(apiVersion: string) {
-  const match = /^(\d+)\.(\d+)$/.exec(apiVersion);
-  if (!match || Number(match[1]) < 1 || (Number(match[1]) === 1 && Number(match[2]) < 45)) {
-    throw new Error("Docker Engine 26+ (API 1.45+) is required for bot home volume subpaths");
-  }
-}
-
-export function homeVolumeMatches(
-  mounts: Docker.ContainerInspectInfo["HostConfig"]["Mounts"],
-  volume: { name: string; subpath: string },
-) {
-  return (
-    mounts?.some(
-      (mount) =>
-        mount.Target === "/home/rakazo" &&
-        mount.Type === "volume" &&
-        mount.Source === volume.name &&
-        mount.VolumeOptions?.Subpath === volume.subpath &&
-        !mount.ReadOnly,
-    ) ?? false
-  );
-}
-
 export interface ComputerCreateInput {
   name: string;
   image: string;
   botId: string;
   spaceId: string;
-  homePath: string;
+  /** The server home a local computer mounts. Absent for a remote computer. */
+  homePath?: string;
   homeVolume?: { name: string; subpath: string };
+  /** Defaults to local, which mounts homePath. */
+  homeMode?: ComputerHomeMode;
   user?: string;
   controlToken?: string;
   networkMode?: string;
@@ -686,6 +631,24 @@ export type SandboxInput =
 export function containerCreateOptions(input: ComputerCreateInput) {
   const ports = computerPortBindings(input.publishControlPort);
   const extraMounts = (input.mounts ?? []).map(computerMountSettings);
+  // Only a local computer has a home to mount; a remote one keeps it in its writable layer.
+  const homeMounts = input.homeVolume
+    ? [
+        {
+          Type: "volume" as const,
+          Source: input.homeVolume.name,
+          Target: "/home/rakazo",
+          // Docker makes Labels and DriverConfig optional; dockerode's types do not.
+          VolumeOptions: {
+            NoCopy: true,
+            Subpath: input.homeVolume.subpath,
+          } as Docker.MountSettings["VolumeOptions"],
+        },
+        ...extraMounts,
+      ]
+    : extraMounts.length
+      ? extraMounts
+      : undefined;
   return {
     Image: input.image,
     name: input.name,
@@ -706,31 +669,17 @@ export function containerCreateOptions(input: ComputerCreateInput) {
       "rakazo.managed": "true",
       "rakazo.botId": input.botId,
       "rakazo.spaceId": input.spaceId,
+      [COMPUTER_HOME_MODE_LABEL]: input.homeMode ?? "local",
       ...(input.mounts?.length ? { [MOUNT_SOURCES_LABEL]: mountSourcesLabel(input.mounts) } : {}),
     },
     ExposedPorts: ports.ExposedPorts,
     HostConfig: {
-      ...(input.homeVolume
-        ? {
-            Binds: undefined,
-            Mounts: [
-              {
-                Type: "volume" as const,
-                Source: input.homeVolume.name,
-                Target: "/home/rakazo",
-                // Docker makes Labels and DriverConfig optional; dockerode's types do not.
-                VolumeOptions: {
-                  NoCopy: true,
-                  Subpath: input.homeVolume.subpath,
-                } as Docker.MountSettings["VolumeOptions"],
-              },
-              ...extraMounts,
-            ],
-          }
-        : {
-            Binds: [`${input.homePath}:/home/rakazo`],
-            Mounts: extraMounts.length ? extraMounts : undefined,
-          }),
+      Binds: input.homeVolume
+        ? undefined
+        : input.homePath
+          ? [`${input.homePath}:/home/rakazo`]
+          : undefined,
+      Mounts: homeMounts,
       PortBindings: ports.PortBindings,
       ShmSize: 256 * 1024 * 1024,
       CapDrop: ["ALL"],
@@ -792,10 +741,23 @@ export function screenUrlFor(hostPort: string, host = SCREEN_HOST) {
   return `http://${host}:${hostPort}/embed.html`;
 }
 
+/** The socket a screen page opens, named the way noVNC's `path` parameter names it. */
+export function screenSocketPath(token: string) {
+  return `websockify?token=${encodeURIComponent(token)}`;
+}
+
 export function screenUrlWithToken(screenUrl: string, token: string) {
   const url = new URL(screenUrl);
-  url.searchParams.set("path", `websockify?token=${encodeURIComponent(token)}`);
+  url.searchParams.set("path", screenSocketPath(token));
   return url.toString();
+}
+
+/**
+ * The same screen relative to a supervisor that relays it. The adapter that asked for it adds the
+ * origin it already calls, so a remote supervisor never has to guess the address it is reached at.
+ */
+export function screenRelayPath(token: string) {
+  return `/embed.html?${new URLSearchParams({ path: screenSocketPath(token) })}`;
 }
 
 /**

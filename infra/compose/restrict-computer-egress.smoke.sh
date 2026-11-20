@@ -314,7 +314,7 @@ grep -q 'https://raw.githubusercontent.com/elie222/rakazo/main/infra/compose/res
 grep -q 'name: rakazo-computer-egress' "$docs" ||
   fail "self-host-docker-computers.md does not keep the VM egress helper in its own Compose project"
 for compose in docker-compose.yml docker-compose.images.yml docker-compose.topology.yml \
-  docker-compose.prod.docker.yml; do
+  docker-compose.prod.docker.yml docker-compose.supervisor.yml; do
   for flag in SANDBOX_COMPUTER_EGRESS SANDBOX_COMPUTER_DNS; do
     grep -q "$flag" "$root/$compose" || fail "$compose does not pass $flag"
   done

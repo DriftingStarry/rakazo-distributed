@@ -5,12 +5,12 @@ import {
   computerNetworkCreateOptions,
   computerNetworkNameFor,
   computerNetworkNamesForCleanup,
-  computerNetworkOwnerFor,
   containerNameFor,
   isIpv6NetworkUnavailable,
   legacyNetworkOwnedSolelyBy,
   screenPeerNetworkConnectOptions,
 } from "./computer-spec.js";
+import { computerNetworkOwnerFor } from "./computers/home.js";
 import {
   dataDir,
   docker,

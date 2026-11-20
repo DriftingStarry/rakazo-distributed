@@ -188,7 +188,11 @@ async function main() {
   const sandbox = await createRunSandbox(sandboxProvider, {
     ...sandboxOptions,
     supervisorUrl: process.env.SANDBOX_SUPERVISOR_URL ?? "http://127.0.0.1:7091",
-    supervisorToken: sandboxProvider === "docker" ? resolveSupervisorToken(process.env) : undefined,
+    // remote-docker is selected only with an explicit origin, so it always has one here.
+    supervisorToken:
+      sandboxProvider === "docker" || sandboxProvider === "remote-docker"
+        ? resolveSupervisorToken(process.env)
+        : undefined,
     dataDir: env.dataDir,
     prisma,
     secrets,

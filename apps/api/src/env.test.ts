@@ -221,6 +221,26 @@ describe("loadEnv", () => {
     );
   });
 
+  it("keeps a remote-docker supervisor origin explicit and loads its token", () => {
+    const remote = {
+      DATABASE_URL: base.DATABASE_URL,
+      NODE_ENV: "production",
+      BETTER_AUTH_SECRET: "prod-auth-secret-with-enough-length",
+      ENCRYPTION_KEY: "prod-encryption-key-with-enough-length",
+      SCREEN_PROXY_SECRET: "prod-screen-proxy-secret-with-enough-length",
+      SANDBOX_PROVIDER: "remote-docker",
+      SANDBOX_SUPERVISOR_URL: "https://supervisor.example.test",
+      SANDBOX_SUPERVISOR_TOKEN: "prod-remote-supervisor-token-32chars",
+    };
+    const env = loadEnv(remote);
+    expect(env.sandboxProvider).toBe("remote-docker");
+    expect(env.sandboxSupervisorUrl).toBe("https://supervisor.example.test");
+    expect(env.sandboxSupervisorToken).toBe("prod-remote-supervisor-token-32chars");
+    // Without an origin the deployment runs no computers rather than calling this host.
+    const missing = loadEnv({ ...remote, SANDBOX_SUPERVISOR_URL: undefined });
+    expect(missing.sandboxProvider).toBe("none");
+  });
+
   it("falls back to none in production when Docker has no supervisor token", () => {
     const env = loadEnv({
       DATABASE_URL: base.DATABASE_URL,

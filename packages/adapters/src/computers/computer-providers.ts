@@ -4,6 +4,7 @@ import { createosComputer } from "../providers/computer/createos/createos-comput
 import { daytonaComputer } from "../providers/computer/daytona/daytona-computer.js";
 import { desktopComputer } from "../providers/computer/desktop/desktop-computer.js";
 import { dockerComputer } from "../providers/computer/docker/docker-computer.js";
+import { remoteDockerComputer } from "../providers/computer/docker/remote-docker-computer.js";
 import { e2bComputer } from "../providers/computer/e2b/e2b-computer.js";
 import { fakeComputer } from "../providers/computer/fake/fake-computer.js";
 import { incusComputer } from "../providers/computer/incus/incus-computer.js";
@@ -23,6 +24,7 @@ import type { ComputerProviderDefinition } from "./computer-provider-descriptor.
 export const computerProviders = {
   none: noneComputer,
   docker: dockerComputer,
+  "remote-docker": remoteDockerComputer,
   wuying: wuyingComputer,
   e2b: e2bComputer,
   novita: novitaComputer,

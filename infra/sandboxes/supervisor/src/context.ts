@@ -18,6 +18,7 @@ import {
   resolveScreenNetworkMode,
   resolveTeamScreenLimit,
 } from "./computer-spec.js";
+import { resolveComputerHomeMode } from "./computers/home.js";
 
 loadRootEnv();
 
@@ -36,6 +37,7 @@ export const supervisorToken = resolveSupervisorToken(process.env);
 export const screenNetworkMode = resolveScreenNetworkMode(process.env.SANDBOX_SCREEN_NETWORK);
 export const computerEgressSetting = resolveComputerEgressMode();
 export const computerDns = resolveComputerDns();
+export const computerHomeMode = resolveComputerHomeMode();
 export const computerComputeGpus = resolveComputerComputeGpus();
 export const computerBrowserProxyPacUrl = resolveComputerBrowserProxyPacUrl();
 export const computerMounts = resolveComputerMounts(undefined, [dataDir, dockerSocketPath]);

@@ -37,19 +37,7 @@ export async function publishedScreenUrl(
 ) {
   for (let i = 0; i < 30; i += 1) {
     const info = i === 0 && initialInfo ? initialInfo : await container.inspect();
-    if (screenNetworkMode === "isolated") {
-      const runtime = supervisorInfo ?? (await inspectSupervisorContainer());
-      const networkName = info.HostConfig.NetworkMode;
-      if (runtime && networkName) await connectComposeScreenPeers(networkName, runtime);
-    }
-    const target = resolveScreenPublishTarget({
-      screenNetwork: screenNetworkMode,
-      networkMode: info.HostConfig.NetworkMode,
-      networks: info.NetworkSettings?.Networks,
-      hostPort: info.NetworkSettings?.Ports?.[`${containerPort}/tcp`]?.[0]?.HostPort,
-      containerPort,
-      screenHost: SCREEN_HOST,
-    });
+    const target = await screenPublishTarget(info, containerPort);
     if (target) {
       const ready = await waitForScreenReady(
         target.host,
@@ -62,4 +50,27 @@ export async function publishedScreenUrl(
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error("computer screen port was not published");
+}
+
+/**
+ * Where this computer's screen port is reachable from the supervisor right now: a published
+ * loopback mapping, or the computer's own address on a screen network the supervisor joined.
+ */
+export async function screenPublishTarget(
+  info: Docker.ContainerInspectInfo,
+  containerPort = "6080",
+) {
+  if (screenNetworkMode === "isolated") {
+    const runtime = supervisorInfo ?? (await inspectSupervisorContainer());
+    const networkName = info.HostConfig.NetworkMode;
+    if (runtime && networkName) await connectComposeScreenPeers(networkName, runtime);
+  }
+  return resolveScreenPublishTarget({
+    screenNetwork: screenNetworkMode,
+    networkMode: info.HostConfig.NetworkMode,
+    networks: info.NetworkSettings?.Networks,
+    hostPort: info.NetworkSettings?.Ports?.[`${containerPort}/tcp`]?.[0]?.HostPort,
+    containerPort,
+    screenHost: SCREEN_HOST,
+  });
 }

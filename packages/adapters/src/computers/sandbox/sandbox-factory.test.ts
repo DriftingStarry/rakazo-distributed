@@ -93,6 +93,24 @@ describe("createSandboxProvider", () => {
     });
   });
 
+  it("returns a remote Docker provider only with an explicit supervisor origin", async () => {
+    await expect(createSandboxProvider("remote-docker", {})).rejects.toThrow(
+      "SANDBOX_SUPERVISOR_URL must name the remote supervisor's origin",
+    );
+    const sandbox = await createSandboxProvider("remote-docker", {
+      supervisorUrl: "https://supervisor.example.test",
+    });
+    expect(sandbox.describe()).toMatchObject({
+      id: "remote-docker",
+      capabilities: { graphical: true, persistentHome: true, multiScreen: true },
+    });
+    await expect(
+      createSandboxProvider("remote-docker", {
+        supervisorUrl: "https://supervisor.example.test/computers",
+      }),
+    ).rejects.toThrow("SANDBOX_SUPERVISOR_URL must be an origin");
+  });
+
   it("boots Incus as none until its address and client certificate are set", async () => {
     const sandbox = await createSandboxProvider("incus", {
       incusUrl: "https://incus.example.test:8443",
@@ -149,14 +167,16 @@ describe("createSandboxProvider", () => {
 
   it("throws on unknown provider", async () => {
     await expect(createSandboxProvider("bogus", {})).rejects.toThrow(
-      'Unknown SANDBOX_PROVIDER "bogus". Use none | docker | wuying | e2b | novita | daytona | createos | boat | boxd | instabox | railway | kubernetes | incus | local-vm | desktop | fake.',
+      'Unknown SANDBOX_PROVIDER "bogus". Use none | docker | remote-docker | wuying | e2b | novita | daytona | createos | boat | boxd | instabox | railway | kubernetes | incus | local-vm | desktop | fake.',
     );
   });
 
   it("accepts only sandbox kinds, including none", async () => {
     expect(knownSandboxKinds).toContain("none");
     for (const kind of knownSandboxKinds) {
-      await expect(createSandboxProvider(kind, {})).resolves.toBeDefined();
+      await expect(
+        createSandboxProvider(kind, { supervisorUrl: "https://supervisor.example.test" }),
+      ).resolves.toBeDefined();
     }
     await expect(createSandboxProvider("not-a-provider", {})).rejects.toThrow(
       /Unknown SANDBOX_PROVIDER/,

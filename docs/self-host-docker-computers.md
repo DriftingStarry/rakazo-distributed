@@ -3,11 +3,202 @@
 Limit what each local Docker computer can use, keep it off your network, and share host folders
 with it.
 
-The Docker supervisor is not published as its own image and is not exposed on the host. It runs from
-the app image, stays on the internal Compose network, and holds the Docker socket because access to
-it is equivalent to control of the Docker host. Docker sandboxes require `SANDBOX_SUPERVISOR_TOKEN`
-(API, worker, supervisor). `SCREEN_PROXY_SECRET` signs browser-screen capabilities (API and web
-proxy). Keep both distinct from `BETTER_AUTH_SECRET`.
+The Docker supervisor is not published as its own image. In this stack it runs from the app image and
+is never exposed: it stays on the internal Compose network and holds the Docker socket because
+access to it is equivalent to control of the Docker host. Docker sandboxes require
+`SANDBOX_SUPERVISOR_TOKEN` (API, worker, supervisor). `SCREEN_PROXY_SECRET` signs browser-screen
+capabilities (API and web proxy). Keep both distinct from `BETTER_AUTH_SECRET`.
+
+The one exception is below: a supervisor serving another host publishes one port, on a private
+address that only the app host reaches.
+
+A deployment can also keep the supervisor on a separate Docker host with
+[`SANDBOX_PROVIDER=remote-docker`](#supervisor-on-another-host).
+
+## Supervisor on another host
+
+The API, worker and web app can run on one host while the supervisor and its bot computers run on
+another Docker host (`SANDBOX_PROVIDER=remote-docker`).
+[`docker-compose.supervisor.yml`](../infra/compose/docker-compose.supervisor.yml) starts that
+supervisor from the app image, with a computer image of the same commit and the same hardening the
+production stack applies.
+
+The supervisor host holds the Docker socket, which is root-equivalent there, and every bot
+computer that deployment runs. Use a host dedicated to it, not a machine that also runs the app
+database or unrelated containers.
+
+### On the supervisor host
+
+The host needs Linux with Docker Engine 26 or newer and the Compose plugin. Where Docker Engine runs
+in a Linux VM (Docker Desktop, OrbStack), the egress rules below belong in that VM; see
+[Docker in a Linux VM](#docker-in-a-linux-vm).
+
+1. Install the restricted-egress host rules once, from this checkout. Computers refuse to start
+   until this check passes, and the firewall returns after a reboot.
+
+   ```bash
+   sudo bash infra/compose/restrict-computer-egress.sh
+   ```
+
+   Where the rules cannot be installed, set `SANDBOX_COMPUTER_EGRESS=open` in the host's `.env`
+   only when that network access is intended and the host is isolated; the
+   [restricted computer egress](#restricted-computer-egress) section covers what it allows.
+
+2. Create this host's environment file from the tracked example. Every command below runs from the
+   root of this checkout, so the stack is the one these docs describe:
+
+   ```bash
+   cp infra/compose/.env.supervisor.example infra/compose/.env
+   ```
+
+3. Generate the shared token privately, for example with `openssl rand -hex 32`, and put the same
+   value in this host's `.env` and in the app host's `.env`. It is the only secret the two hosts
+   share: never reuse `BETTER_AUTH_SECRET`, `SCREEN_PROXY_SECRET` or a provider key, and do not
+   paste it into a shell history, ticket or chat. Keep both `.env` files readable only by their
+   owner and the Compose process.
+
+4. Build both images from this checkout, then set the bind address, the shared token and the tags
+   in `infra/compose/.env`:
+
+   ```bash
+   docker build -f infra/compose/Dockerfile -t ghcr.io/elie222/rakazo/app:local .
+   docker build -t rakazo/computer:local infra/sandboxes/computer
+   ```
+
+   ```env
+   SANDBOX_SUPERVISOR_BIND=10.0.0.5
+   SANDBOX_SUPERVISOR_TOKEN=<the shared token>
+   RAKAZO_IMAGE_TAG=local
+   RAKAZO_COMPUTER_IMAGE=rakazo/computer
+   RAKAZO_COMPUTER_IMAGE_TAG=local
+   ```
+
+   `SANDBOX_SUPERVISOR_BIND` has no default; Compose refuses to start without it. Never use
+   `0.0.0.0` or a public address: that publishes a root-equivalent API to the internet. Loopback
+   (`127.0.0.1`) is only for a smoke test on the host itself, or behind a local TLS tunnel.
+
+   The two sides speak one supervisor contract, so both hosts run the app image from the same
+   commit. The app host builds the same commit too, or loads the image built here with `docker save`
+   and `docker load`. The computer image only runs on this host, but it comes from that commit as
+   well: older and newer images are not tested together.
+
+   No release carries this topology yet, which is why the steps above build instead of pull. Once
+   one does, its published `rakazo/app` and `rakazo/computer` tags replace the build: set
+   `RAKAZO_IMAGE_TAG` and `RAKAZO_COMPUTER_IMAGE_TAG` to that release, leave
+   `RAKAZO_COMPUTER_IMAGE` empty, and take the stack file and example environment from its tag.
+
+5. Start it and check it:
+
+   ```bash
+   docker compose --env-file infra/compose/.env -f infra/compose/docker-compose.supervisor.yml up -d
+   docker compose --env-file infra/compose/.env -f infra/compose/docker-compose.supervisor.yml ps
+   curl -fsS http://10.0.0.5:7091/health
+   ```
+
+   `/health` needs no token and answers `{"ok":true,...}`. A refused connection is the bind
+   address, a firewall rule or the container not running; `docker compose ... logs supervisor`
+   names a missing egress ruleset at startup and each rejected token as it arrives.
+
+   To move the images, set the new tags in `infra/compose/.env`, then
+   `docker compose --env-file infra/compose/.env -f infra/compose/docker-compose.supervisor.yml pull`
+   followed by `up -d`; Compose only pulls a missing image otherwise. The recreated supervisor adopts
+   the computers that are already running, and a computer is rebuilt from its last saved workspace
+   when it next starts on a changed image. Keep the app host's `RAKAZO_IMAGE_TAG` in step with this
+   host.
+
+The stack publishes exactly one port, `7091`, and mounts only the Docker socket. Keep the host
+firewall closed except for that port from the app host's addresses: the API, worker and web server
+containers all call it, the web server to fetch relayed screens.
+
+A private network and an encrypted one are not the same thing. A cloud VPC, a private subnet or a
+host firewall keeps the port off the internet but leaves its bytes readable to anything that can
+watch that network, and screens and service calls carry credentials. Only an encrypted link — TLS
+in front of the port, WireGuard, or a tailnet that encrypts transport — protects them. Where the two
+hosts are not already on one, put TLS in front of the supervisor and keep the TLS certificate's name
+in `SANDBOX_SUPERVISOR_URL`. Plain HTTP is only acceptable where the network is both private and
+trusted by everyone on it.
+
+### On the app host
+
+Run the production base stack alone, without
+[`docker-compose.prod.docker.yml`](../infra/compose/docker-compose.prod.docker.yml): that overlay is
+for local Docker computers and hardcodes the in-stack supervisor address. If the deployment layered
+it before, remove it from every Compose invocation and from `RAKAZO_COMPOSE_FILE` for the updater;
+otherwise a local supervisor keeps starting and the API keeps calling it. Set the provider and the
+supervisor origin in `.env` and recreate the containers that read them:
+
+```env
+SANDBOX_PROVIDER=remote-docker
+SANDBOX_SUPERVISOR_URL=https://sandbox.example.com
+SANDBOX_SUPERVISOR_TOKEN=<the same shared token>
+RAKAZO_IMAGE_TAG=local
+```
+
+The token is the only secret the two hosts share. Never reuse `BETTER_AUTH_SECRET`,
+`SCREEN_PROXY_SECRET` or a provider key for it, keep it out of shell history, tickets and chat, and
+keep this `.env` readable only by its owner and the Compose process.
+
+The app host runs the app image from the same commit as the supervisor, not a release tag. Build it
+here from this checkout, or load the image built on the supervisor host with `docker save` and
+`docker load`, before starting the stack:
+
+```bash
+docker build -f infra/compose/Dockerfile -t ghcr.io/elie222/rakazo/app:local .
+docker compose --env-file .env -f infra/compose/docker-compose.prod.yml up -d
+```
+
+Settings for the computers themselves — the `RAKAZO_COMPUTER_*` ceilings and image tags, egress and
+DNS, mounts and GPUs — are read by the supervisor host's Compose file, so they belong in its
+`infra/compose/.env`. This host's `.env` names only the provider, the origin, the token and its own
+app image tag.
+
+`SANDBOX_SUPERVISOR_URL` is an origin only: `https://sandbox.example.com`, not a path or a URL with
+credentials or a query. Plain HTTP is only for what the screen proxy accepts: a loopback or private
+IP literal above port 1023 (`http://10.0.0.5:7091`), not a DNS name. Provisioning and command
+execution still work over a private DNS name, but live screens and terminals fail closed, so use
+HTTPS or an IP literal there. Then confirm the deployment actually uses it:
+
+```bash
+docker compose --env-file .env -f infra/compose/docker-compose.prod.yml exec api \
+  node -e "fetch('http://127.0.0.1:3100/internal/health').then(r=>r.json()).then(b=>console.log(b.sandbox))"
+```
+
+That prints `remote-docker`. `none` means the origin was missing, or in production the token was
+missing. A token the supervisor rejects still prints `remote-docker`: the provider loads and every
+call then gets a 401, which the supervisor log shows, so start a computer to prove the token works.
+The published computer image is never pulled on the app host for this topology, so no Docker socket
+or computer container is needed there.
+
+### Data, backups and moving
+
+- A remote computer keeps its home in its own container on the supervisor host, not in the app's
+  `DATA_DIR`. Stopping and starting it keeps that home. A computer that has to be replaced (a
+  changed image, a lost container, a Docker prune) is rebuilt and then restores the last saved
+  workspace, so the checkpoint is the copy that survives losing the container.
+- The durable data stays on the app host: the database, uploads, and saved checkpoints under
+  `DATA_DIR` or object storage. Keep the existing [backup routine](./self-host-backups.md) there.
+  The supervisor host holds no app data to back up; its computers' homes are rebuilt from the
+  app's checkpoints.
+- Nothing migrates automatically between hosts or providers. Switching a deployment from its
+  in-stack supervisor (`docker`) to `remote-docker`, or moving the supervisor host, starts new
+  computers: each bot resumes from its last saved workspace and loses whatever was not saved.
+  Take a checkpoint before switching, and keep the old host's data until the new computers look
+  right. Each computer records whether its home is in its container or on a server path, so an
+  in-stack supervisor and a remote one sharing a Docker host never adopt or remove each other's
+  computers, even when their names collide. Do not put two remote supervisors on one host: give
+  each deployment its own.
+
+### Checks
+
+- Supervisor host:
+  `docker compose --env-file infra/compose/.env -f infra/compose/docker-compose.supervisor.yml ps`
+  and the `/health` call above. The container healthcheck uses the same endpoint, so a healthy
+  service is available on the published port.
+- App host: `/internal/health` reports `sandbox: "remote-docker"`, shown above.
+- From the app host, `curl -fsS https://sandbox.example.com/health` proves the route, TLS
+  certificate and firewall rule the API, worker and web containers depend on.
+- `docker compose ... logs supervisor` on the supervisor host is where a rejected token, a missing
+  egress ruleset or a failed computer image pull appears.
 
 ## Resource ceilings
 

@@ -1,4 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import http from "node:http";
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { controlDesktop, MAX_COMPUTER_CONTROL_RESPONSE_BYTES } from "./computer-control.js";
 import {
@@ -207,5 +210,72 @@ describe("computer control HTTP boundary", () => {
         expect(controlRequests).toBe(2);
       },
     );
+  });
+});
+
+describe("computer control process", () => {
+  it("supervises computer control with a bounded restart delay", () => {
+    const start = readFileSync(
+      path.resolve(import.meta.dirname, "../../computer/start.sh"),
+      "utf8",
+    );
+    expect(start).toMatch(
+      /while true; do\s+\/usr\/local\/bin\/rakazo-computer-control\s+sleep 1\s+done >\/tmp\/rakazo\/control\.log 2>&1 &/,
+    );
+    // PID 1 terminates both the background loop and its current child on stop.
+    expect(start).toContain("kill -TERM -- -1");
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "restarts computer control after an abnormal exit",
+    () => {
+      const start = readFileSync(
+        path.resolve(import.meta.dirname, "../../computer/start.sh"),
+        "utf8",
+      );
+      const loop = start.match(
+        /while true; do[\s\S]*?done >\/tmp\/rakazo\/control\.log 2>&1 &/,
+      )?.[0];
+      expect(loop).toBeDefined();
+      const result = spawnSync(
+        "bash",
+        [
+          "-c",
+          [
+            "attempts=0",
+            "control() { echo control; return 137; }",
+            'sleep() { echo "delay $1"; attempts=$((attempts + 1)); if [ "$attempts" -eq 2 ]; then exit 0; fi; }',
+            loop
+              ?.replace("/usr/local/bin/rakazo-computer-control", "control")
+              .replace(" >/tmp/rakazo/control.log 2>&1 &", ""),
+          ].join("\n"),
+        ],
+        { encoding: "utf8", timeout: 5_000 },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe("control\ndelay 1\ncontrol\ndelay 1\n");
+    },
+  );
+
+  it("stops promptly when Docker sends SIGTERM to the start script", () => {
+    const root = path.resolve(import.meta.dirname, "../../computer");
+    const start = readFileSync(path.join(root, "start.sh"), "utf8");
+    expect(start).toMatch(/trap shutdown TERM INT/);
+    expect(start).toMatch(/kill -TERM "\$XVFB_PID"/);
+    expect(start).not.toMatch(/while kill -0 "\$XVFB_PID"/);
+    // The handler must be in place before the first child process starts, so a stop that
+    // arrives during startup is honoured instead of waiting for Docker's grace period.
+    const trapAt = start.indexOf("trap shutdown TERM INT");
+    const firstChildAt = start.search(/^[^#\n]*&\s*$/m);
+    expect(trapAt).toBeGreaterThan(-1);
+    expect(firstChildAt).toBeGreaterThan(-1);
+    expect(trapAt).toBeLessThan(firstChildAt);
+    // A stop before Xvfb exists must not try to signal or wait on an empty PID.
+    expect(start).toMatch(/^XVFB_PID=""$/m);
+    expect(start.match(/if \[\[ -n "\$XVFB_PID" \]\]; then/g)?.length ?? 0).toBeGreaterThanOrEqual(
+      2,
+    );
+    // Steady state waits on Xvfb instead of polling, so the trap runs immediately.
+    expect(start).toMatch(/^wait "\$XVFB_PID"$/m);
   });
 });
